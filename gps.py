@@ -7,6 +7,7 @@ import csv
 import numpy as np
 from datetime import datetime
 
+# Kendi modüllerin
 from config import KFConfig, SimCfg
 from ukf import KF3D_UKF
 from geo_utils import llh_to_enu, parse_if_dms
@@ -106,12 +107,15 @@ def run_receiver_node():
                         )
                         
                         # 1. UKF'i başlat
+                        # UKF INIT bloğunun içinde:
+
+# 1. UKF'i başlat
                         kf.initialize_from_pos(pos0)
 
-                        # 2. HIZ BELİRSİZLİĞİNİ YÜKSELT (Hız anında otursun)
-                        kf.P[7, 7] = 1000.0
-                        kf.P[8, 8] = 1000.0
-                        kf.P[9, 9] = 1000.0
+# ŞU SATIRLARI EKLE (Hızın hemen oturması için belirsizliği aç):
+                        kf.P[7, 7] = 1000.0  # Vx belirsizliği
+                        kf.P[8, 8] = 1000.0  # Vy belirsizliği
+                        kf.P[9, 9] = 1000.0  # Vz belirsizliği
                         
                         is_init = True
                         print("UKF Initialized")
@@ -169,8 +173,7 @@ def run_receiver_node():
                 est_y = kf.x[1, 0]
                 est_z = kf.x[2, 0]
 
-                # 🛑 TEK DEĞİŞİKLİK BURASI: 3D HIZ HESABI
-                # (Eskisi sadece yatay hıza bakıyordu, bu hepsine bakıyor)
+                # 3D HIZ HESABI
                 vx = kf.x[7, 0]
                 vy = kf.x[8, 0]
                 vz = kf.x[9, 0]
@@ -248,15 +251,24 @@ def run_receiver_node():
                     lock_timer_start = None
 
                 # ============================================================
-                # SAHA DIŞI KONTROL
+                # SAHA DIŞI KONTROL (DÜZELTİLDİ ✅)
                 # ============================================================
-                ARENA_RADIUS = 200.0
+                # Guidance yarıçapı 400 ise burası en az 400 olmalı.
+                # Emniyet için 500 yapıyoruz.
+                ARENA_RADIUS = 500.0 
                 dist_me = math.sqrt(est_x**2 + est_y**2)
 
                 if dist_me > ARENA_RADIUS:
+                    # Merkeze dönüş açısı
                     center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
+                    
                     cmd["yaw"] = center_yaw
                     cmd["speed"] = 22.0
+                    
+                    # ÖNEMLİ DÜZELTME: İrtifayı da kontrol altına alıyoruz.
+                    # Saha dışındayken tırmanmaya çalışma, güvenli irtifada dön.
+                    cmd["alt"] = 40.0 
+                    
                     mode_str = "🚧 SAHA DIŞI"
                     lock_timer_start = None
 

@@ -9,13 +9,18 @@ try:
     from config import SimCfg
     from geo_utils import enu_to_llh, parse_if_dms
     
+    # SimCfg değerlerini kesin olarak string'den float'a çeviriyoruz
     REF_LAT = parse_if_dms(SimCfg.lat0)
     REF_LON = parse_if_dms(SimCfg.lon0)
     REF_ALT = SimCfg.h0
     print(f"✅ Config Yüklendi. Referans: {REF_LAT}, {REF_LON}")
 except ImportError:
-    REF_LAT, REF_LON, REF_ALT = 41.508775, 36.118335, 38.0
-    print("⚠️ Config bulunamadı, varsayılan koordinat kullanılıyor.")
+    # BU KISIM KRİTİK: Eğer import başarısız olursa gps.py ile AYNI değerleri kullanmalı
+    # gps.py'deki değerleri buraya kopyala:
+    REF_LAT = 39.920777 # (39°55'14.8"N karşılığı)
+    REF_LON = 32.854111 # (32°51'14.8"E karşılığı)
+    REF_ALT = 900.0
+    print("⚠️ Config bulunamadı, manuel referans kullanılıyor.")
 
 # ==========================
 # AYARLAR
@@ -61,7 +66,7 @@ def main():
     print("📍 Pozisyon başlangıcı: (0,0,50)")
 
     # -----------------------------
-    # İHA DURUMU (ASLA SİLMEDİM)
+    # İHA DURUMU
     # -----------------------------
     my_state = {
         "x": 0.0,
@@ -103,13 +108,22 @@ def main():
                         e["iha_yatis"]   = max(-90, min(90, e.get("iha_yatis", 0)))
                         e["iha_yonelme"] = e.get("iha_yonelme", 0) % 360
 
-                # --- gps.py KOMUTLARI ---
+                # --- gps.py KOMUTLARI (BURASI GÜNCELLENDİ) ---
                 elif s is sock_cmd:
                     cmd = json.loads(data.decode())
-                    my_state["yaw"] = float(cmd.get("yaw", my_state["yaw"]))
-                    my_state["speed"] = float(cmd.get("speed", my_state["speed"]))
+                    
+                    # İstenilen Hız ve Yaw değerlerini al
+                    target_spd = float(cmd.get("speed", my_state["speed"]))
+                    target_yaw = float(cmd.get("yaw", my_state["yaw"]))
 
-                    # İrtifa smooth
+                    # Gelen komutu konsola bas (DEBUG)
+                    print(f"📥 KOMUT ALINDI -> Hız: {target_spd:.1f}, Yaw: {target_yaw:.1f}")
+
+                    # State'i güncelle
+                    my_state["yaw"] = target_yaw
+                    my_state["speed"] = target_spd
+
+                    # İrtifa smooth geçişi
                     target_alt = float(cmd.get("alt", my_state["z"]))
                     my_state["z"] += (target_alt - my_state["z"]) * 0.08
 
@@ -167,19 +181,17 @@ def main():
         except:
             pass
 
+        # Konsolu çok kirletmemek için print yerine sadece status bar gibi tek satır
         print(
-            f"🚁 X={my_state['x']:.1f} "
-            f"Y={my_state['y']:.1f} "
-            f"Z={my_state['z']:.1f} "
-            f"Yaw={my_state['yaw']:.1f}°  | "
+            f"🚁 X={my_state['x']:.0f} "
+            f"Y={my_state['y']:.0f} "
+            f"Spd={my_state['speed']:.1f} | "
             f"Rakip={len(last_enemies)}      ",
             end="\r"
         )
 
         # 50 Hz
         time.sleep(0.02)
-
-
 
 if __name__ == "__main__":
     main()
