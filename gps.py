@@ -12,7 +12,7 @@ from config import KFConfig, SimCfg
 from ukf import KF3D_UKF
 from geo_utils import llh_to_enu, parse_if_dms
 from rival_tracker import RivalTracker, MY_TEAM_ID
-from guidance import GpsPursuitController
+from guidance import GpsPursuitController, SAHA_YARICAPI
 from quaternion_utils import q_to_euler_bounded
 
 # -----------------------------
@@ -27,6 +27,11 @@ CSV_FILENAME = "telemetry_log.csv"
 LOCK_THRESHOLD_M = 20.0
 LOCK_ANGLE_DEG = 20.0
 LOCK_DURATION = 5.0
+SAFETY_MIN_SPEED = 15.0
+SAFETY_MAX_SPEED = 60.0
+SAFETY_MIN_ALT = 20.0
+SAFETY_MAX_ALT = 150.0
+SAHA_DISI_TIMEOUT_S = 40.0
 
 
 def run_receiver_node():
@@ -35,12 +40,13 @@ def run_receiver_node():
     sim_cfg = SimCfg()
     kf_cfg = KFConfig()
 
-    ref_lat = parse_if_dms(sim_cfg.lat0)
-    ref_lon = parse_if_dms(sim_cfg.lon0)
-    ref_h = sim_cfg.h0
+    # Referansı ilk geçerli GPS'ten alacağız
+    ref_lat = None
+    ref_lon = None
+    ref_h = None
 
     kf = KF3D_UKF(kf_cfg)
-    rival_tracker = RivalTracker(ref_lat, ref_lon, ref_h)
+    rival_tracker = None
     guidance = GpsPursuitController()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -57,6 +63,7 @@ def run_receiver_node():
 
     lock_timer_start = None
     locking_target_id = None
+    outside_timer_start = None
 
     # ---------------------------
     # CSV LOG
@@ -101,21 +108,21 @@ def run_receiver_node():
                 # --------------------------------------
                 if not is_init:
                     if tm["gps"]["is_valid"]:
+                        if ref_lat is None:
+                            ref_lat = tm["gps"]["lat"]
+                            ref_lon = tm["gps"]["lon"]
+                            ref_h = tm["gps"]["alt"]
+                            rival_tracker = RivalTracker(ref_lat, ref_lon, ref_h)
+
                         pos0 = llh_to_enu(
                             tm["gps"]["lat"], tm["gps"]["lon"], tm["gps"]["alt"],
                             ref_lat, ref_lon, ref_h
                         )
                         
-                        # 1. UKF'i başlat
-                        # UKF INIT bloğunun içinde:
-
-# 1. UKF'i başlat
                         kf.initialize_from_pos(pos0)
-
-# ŞU SATIRLARI EKLE (Hızın hemen oturması için belirsizliği aç):
-                        kf.P[7, 7] = 1000.0  # Vx belirsizliği
-                        kf.P[8, 8] = 1000.0  # Vy belirsizliği
-                        kf.P[9, 9] = 1000.0  # Vz belirsizliği
+                        kf.P[6, 6] = 1000.0
+                        kf.P[7, 7] = 1000.0
+                        kf.P[8, 8] = 1000.0
                         
                         is_init = True
                         print("UKF Initialized")
@@ -146,7 +153,7 @@ def run_receiver_node():
                 # ============================================================
                 # ⭐ GPS → ENU
                 # ============================================================
-                if tm["gps"]["is_valid"]:
+                if tm["gps"]["is_valid"] and ref_lat is not None:
 
                     raw_pos = llh_to_enu(
                         tm["gps"]["lat"], tm["gps"]["lon"], tm["gps"]["alt"],
@@ -177,15 +184,17 @@ def run_receiver_node():
                 vx = kf.x[7, 0]
                 vy = kf.x[8, 0]
                 vz = kf.x[9, 0]
-                my_speed = math.sqrt(vx**2 + vy**2 + vz**2)
                 
                 roll_d, pitch_d, yaw_d = q_to_euler_bounded(kf.x[3:7, 0])
 
+                # Hız sensörü varsa UKF update ölçümüne büyüklük olarak ekleniyor; burada ayrıca karıştırmıyoruz
+                my_speed = math.sqrt(vx**2 + vy**2 + vz**2)
+
                 # RIVAL
-                if "network_data" in tm:
+                if rival_tracker and "network_data" in tm:
                     rival_tracker.update_from_server_response(tm["network_data"])
 
-                target = rival_tracker.get_closest_rival(est_x, est_y, est_z)
+                target = rival_tracker.get_closest_rival(est_x, est_y, est_z) if rival_tracker else None
 
                 kilit = 0
                 cmd = {}
@@ -250,27 +259,50 @@ def run_receiver_node():
                     mode_str = "HEDEF YOK"
                     lock_timer_start = None
 
+                # Kilit sonrası kontrollü yavaşlama
+                if kilit and cmd:
+                    slow_speed = getattr(guidance, "full_brake", 6.0)
+                    cmd["speed"] = min(cmd.get("speed", slow_speed), slow_speed)
+                    cmd["yaw"] = (cmd.get("yaw", yaw_d) + 90.0) % 360.0
+                    cmd["alt"] = max(cmd.get("alt", 0), 50.0)
+                    mode_str += " | KILIT FREN"
+
                 # ============================================================
-                # SAHA DIŞI KONTROL (DÜZELTİLDİ ✅)
+                # SAHA DIŞI KONTROL / RTB
                 # ============================================================
-                # Guidance yarıçapı 400 ise burası en az 400 olmalı.
-                # Emniyet için 500 yapıyoruz.
-                ARENA_RADIUS = 500.0 
+                ARENA_RADIUS = SAHA_YARICAPI + 100.0 
                 dist_me = math.sqrt(est_x**2 + est_y**2)
 
                 if dist_me > ARENA_RADIUS:
                     # Merkeze dönüş açısı
                     center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
                     
+                    outside_timer_start = outside_timer_start or time.time()
+                    outside_elapsed = time.time() - outside_timer_start
+                    
                     cmd["yaw"] = center_yaw
-                    cmd["speed"] = 22.0
+                    if outside_elapsed > SAHA_DISI_TIMEOUT_S:
+                        # Fail-safe RTB/loiter: yüksek irtifa, güvenli hız
+                        cmd["speed"] = max(cmd.get("speed", 0), 28.0)
+                        cmd["alt"] = max(cmd.get("alt", 0), 60.0)
+                        mode_str = "🚧 RTB/LOITER"
+                    elif outside_elapsed > 30.0:
+                        cmd["speed"] = max(cmd.get("speed", 0), 25.0)
+                        cmd["alt"] = max(cmd.get("alt", 0), 50.0)
+                        mode_str = "🚧 SAHA DIŞI (ACIL)"
+                    else:
+                        cmd["speed"] = max(cmd.get("speed", 0), 22.0)
+                        cmd["alt"] = max(cmd.get("alt", 0), 40.0)
+                        mode_str = "🚧 SAHA DIŞI"
                     
-                    # ÖNEMLİ DÜZELTME: İrtifayı da kontrol altına alıyoruz.
-                    # Saha dışındayken tırmanmaya çalışma, güvenli irtifada dön.
-                    cmd["alt"] = 40.0 
-                    
-                    mode_str = "🚧 SAHA DIŞI"
                     lock_timer_start = None
+                else:
+                    outside_timer_start = None
+
+                # Platform hız/irtifa sınırlarını uygula
+                if cmd:
+                    cmd["speed"] = max(SAFETY_MIN_SPEED, min(SAFETY_MAX_SPEED, cmd.get("speed", SAFETY_MIN_SPEED)))
+                    cmd["alt"] = max(SAFETY_MIN_ALT, min(SAFETY_MAX_ALT, cmd.get("alt", SAFETY_MIN_ALT)))
 
                 # KOMUT GÖNDER
                 control_sock.sendto(

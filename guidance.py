@@ -37,14 +37,20 @@ class GpsPursuitController:
         self,
         min_speed_ms: float = 12.0,
         max_speed_ms: float = 65.0,
+        full_brake_speed_ms: float = 6.0,
+        max_escape_speed_ms: float = 55.0,
         brake_distance_m: float = 30.0,
+        hard_brake_distance_m: float = 12.0,
         cruise_distance_m: float = 120.0,
         catchup_gain: float = 0.25,
         max_yaw_step_deg: float = 6.0,
     ):
         self.min = min_speed_ms
         self.max = max_speed_ms
+        self.full_brake = full_brake_speed_ms
+        self.max_escape_speed = max_escape_speed_ms
         self.brake = brake_distance_m
+        self.hard_brake = hard_brake_distance_m
         self.cruise = cruise_distance_m
         self.k = catchup_gain
 
@@ -101,8 +107,8 @@ class GpsPursuitController:
         # ======================================================
         #      ⭐ SAHA DIŞINA ÇIKMA KONTROLÜ (EKLEME) ⭐
         # ======================================================
-        FIELD_RADIUS = 600
-        RETURN_SPEED = 22
+        FIELD_RADIUS = SAHA_YARICAPI + 50  # saha sınırından biraz fazlası
+        RETURN_SPEED = min(self.max, max(self.min + 5.0, 22))
 
         dist_from_center = math.sqrt(my_pos[0]**2 + my_pos[1]**2)
 
@@ -162,7 +168,8 @@ class GpsPursuitController:
                 best_escape_yaw = yaw2
 
             desired_yaw = self._smooth_yaw(best_escape_yaw)
-            desired_speed = self.max 
+            # Kaçış hızını rakip + marj ile sınırla, maks hız aşılmasın
+            desired_speed = min(self.max, max(self.min, target_speed + 10.0))
             
             # b) DİKEY KAÇIŞ (3D MANEVRA)
             if "KAFA KAFAYA" in esc_reason:
@@ -173,6 +180,9 @@ class GpsPursuitController:
                 # Hız tehdidi varsa yukarı kaç (Tırmanış)
                 desired_alt = target["z"] + 20.0
                 maneuver = "TIRMANIŞ"
+
+            # Kaçışta hız limitini güvenli bir üst sınırla kısıtla
+            desired_speed = min(self.max_escape_speed, max(self.min, desired_speed))
 
             return GuidanceCommand(
                 desired_speed_ms=desired_speed,
@@ -201,6 +211,16 @@ class GpsPursuitController:
         # HIZ KONTROLÜ
         mode_speed = ""
         spd = self.min
+
+        # Çok yakında sert fren (çarpışmayı azaltmak için)
+        if dist <= self.hard_brake:
+            spd = max(self.full_brake, self.min * 0.5)
+            mode_speed = " SERT FREN"
+
+        # Kafa kafaya yaklaşmada ekstra yavaşla
+        elif angle_diff > 135 and dist < 25:
+            spd = max(self.full_brake, min(self.max, target_speed * 0.4))
+            mode_speed = " KAFA KAFAYA FREN"
 
         if dist <= self.brake:
             ratio = max(0.0, dist/self.brake)

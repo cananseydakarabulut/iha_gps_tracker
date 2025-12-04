@@ -52,17 +52,28 @@ def fx(x, dt, u, g_enu=np.array([0, 0, -9.81])):
     a_ENU = R_BODY_TO_ENU @ a_body_true - g_enu
 
     # ⭐ PATCH 1: İvme Limitleme (Senin kodundaki mantık aynen duruyor)
-    a_ENU = np.clip(a_ENU, -30.0, 30.0) 
+    a_ENU = np.clip(a_ENU, -30.0, 30.0)
+
+    # Küçük ivmeyi yok say (deadband), gereksiz hız artışı olmasın
+    a_norm = np.linalg.norm(a_ENU)
+    if a_norm < 0.5:
+        a_ENU = np.zeros(3)
 
     v_old = x[7:10]
     p_old = x[0:3]
 
-    # 🛑 DÜZELTME BURADA YAPILDI 🛑
-    # Eski hali: v_new = v_old + a_ENU * dt 
-    # (Bu satır yerçekimi hatası yüzünden hızı 466'ya fırlatıyordu)
-    
-    # Yeni hali: İvmeyi hıza ekleme, hızı GPS düzeltsin.
-    v_new = v_old 
+    # Hız modeli: ivme varsa ekle, yoksa sabit hız + hafif sönüm
+    dv = a_ENU * dt
+    dv_norm = np.linalg.norm(dv)
+    max_dv = 8.0  # tek adımda izin verilen en büyük hız değişimi (m/s)
+
+    if dv_norm < 0.5:
+        dv = np.zeros(3)
+    elif dv_norm > max_dv:
+        dv = dv * (max_dv / dv_norm)
+
+    vel_decay = 0.995  # hafif drag benzeri etki
+    v_new = v_old * vel_decay + dv
 
     # Konum hesabında ivmeyi kullanmaya devam edebiliriz (kısa anlık tepki için)
     p_new = p_old + v_old * dt + 0.5 * a_ENU * dt**2
@@ -74,7 +85,7 @@ def fx(x, dt, u, g_enu=np.array([0, 0, -9.81])):
 
 
 # ==============================================================================
-# 2. ÖLÇÜM MODELİ (HX) - (AYNEN KORUNDU)
+# 2. ÖLÇÜM MODELİ (HX) - (HIZ BÜYÜKLÜĞÜ EKLENDİ)
 # ==============================================================================
 def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     """
@@ -97,7 +108,10 @@ def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     # Manyetometre tahmini
     z_mag = R_ENU_TO_BODY @ m_ref
 
-    return np.concatenate((z_gps, z_acc, z_mag))
+    # Ground speed büyüklüğü
+    speed_mag = np.linalg.norm(x[7:10])
+
+    return np.concatenate((z_gps, z_acc, z_mag, [speed_mag]))
 
 
 # ==============================================================================
@@ -110,7 +124,7 @@ class KF3D_UKF:
         self.x = np.zeros((16, 1))
 
         self.L_err = 15
-        self.M = 9
+        self.M = 10
 
         self.P = np.eye(self.L_err) * 10.0
         self.initialized = False
@@ -128,10 +142,7 @@ class KF3D_UKF:
         self.Wc[0] = self.lambda_/(self.L_err+self.lambda_) + (1-self.alpha**2+self.beta)
 
 
-    # ----------------------------------------------------
-    # ----------------------------------------------------
-    # BU FONKSİYONU UKF.PY İÇİNE YAPIŞTIR (ESKİSİNİ SİL)
-    # ----------------------------------------------------
+ 
     def initialize_from_pos(self, pos_enu, v_init=None):
         """
         UKF Başlatıcı.
@@ -164,9 +175,9 @@ class KF3D_UKF:
         
         # Hız Belirsizliğini (Variance) ÇOK YÜKSEK yapıyoruz (1000.0).
         # Bu sayede UKF, ilk ölçümde "hızım 0'mış" demez, GPS ne diyorsa ona atlar.
-        self.P[7, 7] = 1000.0  # Vx belirsizliği
-        self.P[8, 8] = 1000.0  # Vy belirsizliği
-        self.P[9, 9] = 1000.0  # Vz belirsizliği
+        self.P[6, 6] = 1000.0  # Vx belirsizliği
+        self.P[7, 7] = 1000.0  # Vy belirsizliği
+        self.P[8, 8] = 1000.0  # Vz belirsizliği
 
         self.initialized = True
         print(f"🔧 UKF Başlatıldı (Hızlı Adaptasyon Modu). Konum: {pos_enu}")
@@ -256,7 +267,7 @@ class KF3D_UKF:
 
         # ⭐ PATCH 3: Hız Limitleme (Aynen korundu)
         speed_mag = np.linalg.norm(x_new[7:10])
-        MAX_SPEED = 60.0
+        MAX_SPEED = 80.0
         if speed_mag > MAX_SPEED:
             x_new[7:10] *= (MAX_SPEED / speed_mag)
 
@@ -315,7 +326,8 @@ class KF3D_UKF:
             self.cfg.r_acc**2,
             self.cfg.r_mag**2,
             self.cfg.r_mag**2,
-            self.cfg.r_mag**2
+            self.cfg.r_mag**2,
+            (self.cfg.r_speed)**2
         ])
 
         S = R_mat.copy()
@@ -375,6 +387,12 @@ class KF3D_UKF:
         self.P = self.P - K @ S @ K.T
         self.P = (self.P + self.P.T)/2.0
         self.P += np.eye(self.L_err) * 1e-9
+
+        # Hız limiti (ölçüm güncellemesinden sonra da uygula)
+        speed_mag = np.linalg.norm(self.x[7:10])
+        MAX_SPEED = 80.0
+        if speed_mag > MAX_SPEED:
+            self.x[7:10] *= (MAX_SPEED / speed_mag)
 
         return True
 

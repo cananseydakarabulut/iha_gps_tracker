@@ -267,8 +267,8 @@ class RivalTracker:
 
     def get_closest_rival(self, my_x, my_y, my_z):
         now = time.time()
-        closest = None
-        min_d = float("inf")
+        best = None
+        best_score = float("inf")
 
         for tid, ukf in self.filters.items():
             if tid in self.ignored: continue
@@ -292,10 +292,15 @@ class RivalTracker:
 
             dist = math.sqrt((px_f - my_x)**2 + (py_f - my_y)**2 + (pz_f - my_z)**2)
 
-            if dist < min_d:
-                min_d = dist
+            # Öncelik skoru: mesafe + gecikme ve hız tehdidi penaltesi
+            lag_penalty = v * dt_future
+            threat_penalty = max(0.0, 0.5 * (v - 40.0))
+            score = dist + lag_penalty + threat_penalty
+
+            if score < best_score:
+                best_score = score
                 att = self.rival_attitude.get(tid, {"pitch":0, "roll":0})
-                closest = {
+                best = {
                     "takim_numarasi": tid,
                     "x": px_f, "y": py_f, "z": pz_f,
                     "hiz": math.sqrt(v*v + vz*vz),
@@ -306,4 +311,4 @@ class RivalTracker:
                     "gecikme_ms": dt_future * 1000.0
                 }
 
-        return closest
+        return best

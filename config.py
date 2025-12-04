@@ -14,6 +14,8 @@ class KFConfig:
     r_gps_v: float = 5.0           # dikey GPS gürültüsü (m)
     r_acc: float = 0.5             # ivme gürültüsü
     r_mag: float = 0.05            # manyetometre gürültüsü
+    r_imu: float = 0.01            # gyro gürültüsü (rad/s)
+    r_speed: float = 1.0           # hız sensör gürültüsü (m/s)
 
     # Chi2 aykırı ölçüm test eşiği
     chi2_threshold: float = chi2.ppf(0.99, df=9)  # 9 boyutlu ölçüm için
