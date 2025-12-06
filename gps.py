@@ -61,6 +61,7 @@ def run_receiver_node():
     last_time = None
     is_init = False
 
+    my_speed = 0.0
     lock_timer_start = None
     locking_target_id = None
     outside_timer_start = None
@@ -94,6 +95,8 @@ def run_receiver_node():
             try:
                 data, _ = sock.recvfrom(BUFFER_SIZE)
                 tm = json.loads(data.decode("utf-8"))
+
+                gps_valid = tm.get("gps", {}).get("is_valid", False)
 
                 t_now = tm["time_s"]
                 if last_time is None:
@@ -163,11 +166,15 @@ def run_receiver_node():
                     # Eksen düzeltme YOK (Orijinal halin)
                     ukf_input_pos = raw_pos 
 
+                    # GPS hızını ölçüm vektörüne ekle (UKF 10 eleman bekliyor)
+                    gps_speed = float(tm["gps"].get("speed_ms", tm["gps"].get("ground_speed", my_speed)))
+
                     z_full = np.concatenate(
                         (
-                            ukf_input_pos,
-                            acc_body,
-                            [20.0, 0.0, 45.0]
+                            ukf_input_pos,      # 3
+                            acc_body,           # 3
+                            [20.0, 0.0, 45.0],  # manyetometre yer tutucu
+                            [gps_speed],        # yer hızı büyüklüğü
                         )
                     )
 
@@ -194,9 +201,10 @@ def run_receiver_node():
                 if rival_tracker and "network_data" in tm:
                     rival_tracker.update_from_server_response(tm["network_data"])
 
-                target = rival_tracker.get_closest_rival(est_x, est_y, est_z) if rival_tracker else None
+                target = rival_tracker.get_closest_rival(est_x, est_y, est_z, yaw_d) if rival_tracker else None
 
                 kilit = 0
+                visual_mode = False
                 cmd = {}
                 t_id = 0
                 t_dist = 0.0
@@ -233,6 +241,8 @@ def run_receiver_node():
                             if rival_tracker.report_lock_event(t_id):
                                 kilit = 1
                                 print(f"🎯 KİLİT TAMAMLANDI! Takım {t_id} VURULDU!")
+                                visual_mode = True
+                                mode_str = "VISUAL FOLLOW | KILIT"
                                 lock_timer_start = None
                                 locking_target_id = None
                         else:
@@ -260,45 +270,45 @@ def run_receiver_node():
                     lock_timer_start = None
 
                 # Kilit sonrası kontrollü yavaşlama
-                if kilit and cmd:
+                if (kilit or visual_mode) and cmd:
                     slow_speed = getattr(guidance, "full_brake", 6.0)
                     cmd["speed"] = min(cmd.get("speed", slow_speed), slow_speed)
                     cmd["yaw"] = (cmd.get("yaw", yaw_d) + 90.0) % 360.0
                     cmd["alt"] = max(cmd.get("alt", 0), 50.0)
-                    mode_str += " | KILIT FREN"
+                    if "KILIT FREN" not in mode_str:
+                        mode_str += " | KILIT FREN"
 
                 # ============================================================
-                # SAHA DIŞI KONTROL / RTB
                 # ============================================================
-                ARENA_RADIUS = SAHA_YARICAPI + 100.0 
-                dist_me = math.sqrt(est_x**2 + est_y**2)
+                # SAHA DISI KONTROL / RTB
+                # ============================================================
+                # GPS gecerli degilse yanlis RTB tetiklemesin diye saha kontrolunu atla
+                if gps_valid:
+                    ARENA_RADIUS = SAHA_YARICAPI + 100.0 
+                    dist_me = math.sqrt(est_x**2 + est_y**2)
 
-                if dist_me > ARENA_RADIUS:
-                    # Merkeze dönüş açısı
-                    center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
-                    
-                    outside_timer_start = outside_timer_start or time.time()
-                    outside_elapsed = time.time() - outside_timer_start
-                    
-                    cmd["yaw"] = center_yaw
-                    if outside_elapsed > SAHA_DISI_TIMEOUT_S:
-                        # Fail-safe RTB/loiter: yüksek irtifa, güvenli hız
-                        cmd["speed"] = max(cmd.get("speed", 0), 28.0)
-                        cmd["alt"] = max(cmd.get("alt", 0), 60.0)
-                        mode_str = "🚧 RTB/LOITER"
-                    elif outside_elapsed > 30.0:
-                        cmd["speed"] = max(cmd.get("speed", 0), 25.0)
-                        cmd["alt"] = max(cmd.get("alt", 0), 50.0)
-                        mode_str = "🚧 SAHA DIŞI (ACIL)"
+                    if dist_me > ARENA_RADIUS:
+                        # Merkeze donuk aciyi bul
+                        center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
+                        outside_timer_start = outside_timer_start or time.time()
+                        outside_elapsed = time.time() - outside_timer_start
+                        cmd["yaw"] = center_yaw
+                        if outside_elapsed > SAHA_DISI_TIMEOUT_S:
+                            cmd["speed"] = max(cmd.get("speed", 0), 28.0)
+                            cmd["alt"] = max(cmd.get("alt", 0), 60.0)
+                            mode_str = "RTB/LOITER"
+                            cmd["action"] = "rtl"
+                        elif outside_elapsed > 30.0:
+                            cmd["speed"] = max(cmd.get("speed", 0), 25.0)
+                            cmd["alt"] = max(cmd.get("alt", 0), 50.0)
+                            mode_str = "SAHA DISI (ACIL)"
+                            cmd["action"] = cmd.get("action") or "loiter"
+                        else:
+                            cmd["speed"] = max(cmd.get("speed", 0), 22.0)
+                            cmd["alt"] = max(cmd.get("alt", 0), 40.0)
+                            mode_str = "SAHA DISI"
                     else:
-                        cmd["speed"] = max(cmd.get("speed", 0), 22.0)
-                        cmd["alt"] = max(cmd.get("alt", 0), 40.0)
-                        mode_str = "🚧 SAHA DIŞI"
-                    
-                    lock_timer_start = None
-                else:
-                    outside_timer_start = None
-
+                        outside_timer_start = None
                 # Platform hız/irtifa sınırlarını uygula
                 if cmd:
                     cmd["speed"] = max(SAFETY_MIN_SPEED, min(SAFETY_MAX_SPEED, cmd.get("speed", SAFETY_MIN_SPEED)))

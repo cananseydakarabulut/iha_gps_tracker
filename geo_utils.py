@@ -17,13 +17,18 @@ def parse_if_dms(value):
         return float(value)
     value = str(value).strip()
 
-    match = re.match(r"(\d+)°(\d+)'([\d.]+)\"?([NSEW])", value)
+    # Desteklenen formatlar: 39°55'14.8"N, 39 55 14.8N, 39d55m14.8sN
+    dms_pattern = re.compile(
+        r"(\d+)[°ºd]?\s*(\d+)'?\s*([\d.]+)\"?\s*([NSEW])",
+        re.IGNORECASE,
+    )
+    match = dms_pattern.match(value.replace(" ", ""))
     if match:
         deg, minute, sec, direction = match.groups()
-        return dmstodecimal(float(deg), float(minute), float(sec), direction)
+        return dmstodecimal(float(deg), float(minute), float(sec), direction.upper())
 
     value = value.replace(",", ".")
-    if value[-1] in ["N", "S", "E", "W"]:
+    if value and value[-1] in ["N", "S", "E", "W"]:
         num = float(value[:-1])
         if value[-1] in ["S", "W"]:
             num = -num
@@ -61,10 +66,9 @@ def bearing_deg(lat1, lon1, lat2, lon2):
 
 
 # ==============================================================================
-# ⚠️ DÜZELTME: Parametre sırası (Hedef, Referans) olarak ayarlandı.
+# Parametre sırası (Hedef, Referans) olarak ayarlandı.
 # gps.py ve rival_tracker.py bu sırayı bekliyor.
 # ==============================================================================
-
 def llh_to_enu(lat, lon, h, lat_ref, lon_ref, h_ref):
     """
     GPS -> ENU (Metre)
@@ -75,15 +79,14 @@ def llh_to_enu(lat, lon, h, lat_ref, lon_ref, h_ref):
     lon_ref = parse_if_dms(lon_ref)
     lat = parse_if_dms(lat)
     lon = parse_if_dms(lon)
-    
-    # Fark: Hedef - Referans
+
     dlat = (lat - lat_ref) * pr
     dlon = (lon - lon_ref) * pr
-    
+
     x = R * math.cos(lat_ref * pr) * dlon
     y = R * dlat
     z = h - h_ref
-    
+
     return np.array([x, y, z], dtype=float)
 
 
@@ -94,11 +97,11 @@ def enu_to_llh(x, y, z, lat_ref, lon_ref, h_ref):
     pr = math.pi / 180.0
     lat_ref = parse_if_dms(lat_ref)
     lon_ref = parse_if_dms(lon_ref)
-    
+
     lat = lat_ref + (y / R) / pr
     lon = lon_ref + (x / (R * math.cos(lat_ref * pr))) / pr
     h = h_ref + z
-    
+
     return lat, lon, h
 
 

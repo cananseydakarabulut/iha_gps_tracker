@@ -4,8 +4,12 @@ from dataclasses import dataclass
 # ==========================
 # AYARLAR
 # ==========================
-SAHA_YARICAPI = 400.0  # (Metre) Yarışma alanının yarıçapı
-GUVENLI_IRTİFA = 40.0  # Saha dışına çıkınca dönülecek irtifa
+# SITL referansı kayık veya GPS yokken bile "saha dışı"na düşmemek için geniş tutuldu.
+SAHA_YARICAPI = 10000.0  # (Metre) Yarışma alanının yarıçapı (testte ekstra genişletildi)
+GUVENLI_IRTIFA = 40.0   # Saha dışına çıkınca dönülecek irtifa
+VISUAL_DIST_THRESH_M = 35.0  # Görsel moda geçiş mesafe eşiği
+VISUAL_SPEED_THRESH = 6.0    # Görsel moda geçiş hedef hız eşiği
+
 
 # ==========================
 # KOMUT VERİ YAPISI
@@ -16,7 +20,8 @@ class GuidanceCommand:
     desired_yaw_deg: float
     desired_altitude_m: float
     distance_to_target_m: float
-    mode: str 
+    mode: str
+
 
 # ==========================
 # AÇI NORMALİZASYONU
@@ -28,6 +33,7 @@ def _normalize_deg(angle: float) -> float:
     while angle <= -180.0:
         angle += 360.0
     return angle
+
 
 # ==========================
 # GPS TAKİP KONTROLCÜSÜ
@@ -77,20 +83,20 @@ class GpsPursuitController:
         return new_yaw
 
     # ======================================================
-    #             🔥 KAÇIŞ ANALİZİ (GELİŞMİŞ)
+    #             ÇARPIŞMA/KAÇIŞ ANALİZİ
     # ======================================================
     def _escape_check(self, dist, target_speed, angle_diff):
-        # 1 — Çok yakın çarpışma riski
+        # 1) Çok yakın çarpışma riski
         if dist < 10.0:
-            return True, " KRİTİK YAKINLIK"
+            return True, "KRITIK YAKINLIK"
 
-        # 2 — Rakip tam bize bakıyor (Kafa kafaya)
+        # 2) Rakip tam bize bakıyor (Kafa kafaya)
         if angle_diff > 130 and dist < 45.0:
-            return True, "KAFA KAFAYA"
+            return True, "KAFA KAFA"
 
-        # 3 — Rakip aşırı hızlı yaklaşıyor
+        # 3) Rakip çok hızlı yaklaşıyor
         if target_speed > 50.0 and dist < 35.0:
-            return True, " HIZ TEHDİDİ"
+            return True, "HIZ TEHDIT"
 
         return False, ""
 
@@ -101,50 +107,39 @@ class GpsPursuitController:
         """
         my_pos   : (x, y, z)
         my_speed : float (İHA'nın kendi hızı)
-        target   : RivalTracker’dan gelen dict
+        target   : RivalTracker'dan gelen dict
         """
 
-        # ======================================================
-        #      ⭐ SAHA DIŞINA ÇIKMA KONTROLÜ (EKLEME) ⭐
-        # ======================================================
-        FIELD_RADIUS = SAHA_YARICAPI + 50  # saha sınırından biraz fazlası
-        RETURN_SPEED = min(self.max, max(self.min + 5.0, 22))
+        # 0. SAHA DIŞI KONTROLÜ
+        field_radius = SAHA_YARICAPI + 50.0
+        return_speed = min(self.max, max(self.min + 5.0, 22.0))
+        dist_from_center = math.sqrt(my_pos[0] ** 2 + my_pos[1] ** 2)
 
-        dist_from_center = math.sqrt(my_pos[0]**2 + my_pos[1]**2)
-
-        if dist_from_center > FIELD_RADIUS:
+        if dist_from_center > field_radius:
             return_yaw = math.degrees(math.atan2(-my_pos[1], -my_pos[0])) % 360.0
             return GuidanceCommand(
-                desired_speed_ms=RETURN_SPEED,
+                desired_speed_ms=return_speed,
                 desired_yaw_deg=self._smooth_yaw(return_yaw),
                 desired_altitude_m=my_pos[2],
                 distance_to_target_m=dist_from_center,
-                mode="🏁 SAHA DIŞI → MERKEZE DÖNÜŞ"
+                mode="SAHA DISI - MERKEZE DON",
             )
 
-        # 0. GEOFENCE (SAHA SINIRI) KONTROLÜ - ÖNCE GÜVENLİK!
-        dist_from_center = math.sqrt(my_pos[0]**2 + my_pos[1]**2)
-        
         if dist_from_center > SAHA_YARICAPI:
-            # Merkeze (0,0) dönmemiz lazım
             center_yaw = math.degrees(math.atan2(-my_pos[1], -my_pos[0])) % 360.0
-            
             return GuidanceCommand(
-                desired_speed_ms=self.max, # Hızla içeri gir
+                desired_speed_ms=self.max,
                 desired_yaw_deg=self._smooth_yaw(center_yaw),
-                desired_altitude_m=GUVENLI_IRTİFA,
-                distance_to_target_m=9999.9, # Hedefle ilgilenmiyoruz
-                mode="🚧 SAHA DIŞI - DÖNÜŞ"
+                desired_altitude_m=GUVENLI_IRTIFA,
+                distance_to_target_m=9999.9,
+                mode="SAHA DISI - DON",
             )
-
-        # -----------------------------------------------------
 
         # 1. HEDEF MESAFE VE KONUM FARKI
         dx = target["x"] - my_pos[0]
         dy = target["y"] - my_pos[1]
         dz = target["z"] - my_pos[2]
-
-        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
 
         # 2. AÇILAR
         raw_yaw = math.degrees(math.atan2(dy, dx)) % 360.0
@@ -153,35 +148,28 @@ class GpsPursuitController:
 
         target_speed = float(target.get("hiz", 20.0))
 
-        # 3. KAÇIŞ KONTROLÜ (3D MANEVRA EKLENDİ)
+        # 3. KAÇIŞ KONTROLÜ
         escape, esc_reason = self._escape_check(dist, target_speed, angle_diff)
-
         if escape:
-            # a) YATAY KAÇIŞ: 90 derece kır
             yaw1 = (target_heading + 90) % 360
             yaw2 = (target_heading - 90) % 360
-            current_yaw = self._last_yaw_cmd if self._last_yaw_cmd else raw_yaw
-            
+            current_yaw = self._last_yaw_cmd if self._last_yaw_cmd is not None else raw_yaw
+
             if abs(_normalize_deg(yaw1 - current_yaw)) < abs(_normalize_deg(yaw2 - current_yaw)):
                 best_escape_yaw = yaw1
             else:
                 best_escape_yaw = yaw2
 
             desired_yaw = self._smooth_yaw(best_escape_yaw)
-            # Kaçış hızını rakip + marj ile sınırla, maks hız aşılmasın
             desired_speed = min(self.max, max(self.min, target_speed + 10.0))
-            
-            # b) DİKEY KAÇIŞ (3D MANEVRA)
-            if "KAFA KAFAYA" in esc_reason:
-                # Rakibin altına dal (Daha güvenlidir)
-                desired_alt = max(10.0, target["z"] - 15.0)
-                maneuver = "DALIŞ"
-            else:
-                # Hız tehdidi varsa yukarı kaç (Tırmanış)
-                desired_alt = target["z"] + 20.0
-                maneuver = "TIRMANIŞ"
 
-            # Kaçışta hız limitini güvenli bir üst sınırla kısıtla
+            if "KAFA" in esc_reason:
+                desired_alt = max(10.0, target["z"] - 15.0)
+                maneuver = "DALIS"
+            else:
+                desired_alt = target["z"] + 20.0
+                maneuver = "TIRMANIS"
+
             desired_speed = min(self.max_escape_speed, max(self.min, desired_speed))
 
             return GuidanceCommand(
@@ -189,49 +177,51 @@ class GpsPursuitController:
                 desired_yaw_deg=desired_yaw,
                 desired_altitude_m=desired_alt,
                 distance_to_target_m=dist,
-                mode=f"{esc_reason} + {maneuver}"
+                mode=f"{esc_reason} + {maneuver}",
             )
 
-        # =====================================================
-        # 🔽 NORMAL TAKİP MODU
-        # =====================================================
+        # 4. GÖRSEL MOD SİNYALİ
+        visual_lock = (dist < VISUAL_DIST_THRESH_M) and (target_speed < VISUAL_SPEED_THRESH)
+        if visual_lock:
+            desired_yaw = self._smooth_yaw(raw_yaw)
+            desired_alt = target["z"]
+            spd = max(self.full_brake, min(self.min + 3.0, target_speed + 2.0, self.max))
+            return GuidanceCommand(
+                desired_speed_ms=spd,
+                desired_yaw_deg=desired_yaw,
+                desired_altitude_m=desired_alt,
+                distance_to_target_m=dist,
+                mode="VISUAL",
+            )
 
+        # 5. NORMAL TAKİP
         if angle_diff < 45:
             final_yaw_target = target_heading
-            mode_yaw = " ARKA HİZA"
+            mode_yaw = " ARKA HIZA"
         else:
             final_yaw_target = raw_yaw
             mode_yaw = " DIREKT"
 
         desired_yaw = self._smooth_yaw(final_yaw_target)
+        desired_alt = target["z"]
 
-        # İRTİFA: Tam hizalanma (Sıfır fark)
-        desired_alt = target["z"] 
-
-        # HIZ KONTROLÜ
         mode_speed = ""
         spd = self.min
 
-        # Çok yakında sert fren (çarpışmayı azaltmak için)
         if dist <= self.hard_brake:
             spd = max(self.full_brake, self.min * 0.5)
             mode_speed = " SERT FREN"
-
-        # Kafa kafaya yaklaşmada ekstra yavaşla
         elif angle_diff > 135 and dist < 25:
             spd = max(self.full_brake, min(self.max, target_speed * 0.4))
-            mode_speed = " KAFA KAFAYA FREN"
-
-        if dist <= self.brake:
-            ratio = max(0.0, dist/self.brake)
+            mode_speed = " KAFA FREN"
+        elif dist <= self.brake:
+            ratio = max(0.0, dist / self.brake)
             spd = target_speed * (0.5 + 0.3 * ratio)
             mode_speed = " FREN"
-
         elif dist <= self.cruise:
             ratio = (dist - self.brake) / max(1.0, self.cruise - self.brake)
             spd = target_speed - 2 + 4 * ratio
             mode_speed = " TAKIP"
-
         else:
             extra = self.k * (dist - self.cruise)
             spd = target_speed + extra

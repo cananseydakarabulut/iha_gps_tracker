@@ -2,7 +2,8 @@ import collections
 import json
 import math
 import socket
-from dronekit import connect, LocationGlobalRelative
+import time
+from dronekit import connect, LocationGlobalRelative, VehicleMode
 from pymavlink import mavutil
 
 # Python 3.10+ uyumluluk (DroneKit eski collections API'sini kullanıyor)
@@ -13,7 +14,7 @@ if not hasattr(collections, "MutableMapping"):
     collections.MutableSet = collections.abc.MutableSet  # type: ignore
 
 # Bağlantı ayarları (Mission Planner/SITL TCP varsayılanı 5760)
-CONNECTION_STRING = "tcp:127.0.0.1:5760"
+CONNECTION_STRING = "tcp:127.0.0.1:5770"
 BAUD_RATE = 115200  # TCP'de kullanılmaz, seri için gerekli
 
 # gps.py komutlarını dinleyeceğimiz soket
@@ -45,6 +46,38 @@ def clamp(val, lo, hi):
 
 def main():
     vehicle = connect(CONNECTION_STRING, wait_ready=True, baud=BAUD_RATE)
+    print(f"Connected: {CONNECTION_STRING}")
+
+    # Auto switch to GUIDED, arm, and take off once
+    target_takeoff_alt = 40  # meters
+    try:
+        if vehicle.mode.name != "GUIDED":
+            print("Switching to GUIDED...")
+            vehicle.mode = VehicleMode("GUIDED")
+            vehicle.flush()
+
+        if not vehicle.armed:
+            print("Arming...")
+            vehicle.armed = True
+            vehicle.flush()
+
+        print(f"Takeoff to {target_takeoff_alt} m...")
+        vehicle.simple_takeoff(target_takeoff_alt)
+
+        t_start = time.time()
+        while True:
+            alt_now = vehicle.location.global_relative_frame.alt or 0.0
+            print(f"Alt: {alt_now:.1f} m", end="\r")
+            if alt_now >= target_takeoff_alt * 0.95:
+                print(f"\nReached takeoff altitude (~{alt_now:.1f} m)")
+                break
+            if time.time() - t_start > 45:
+                print("\nTakeoff wait timed out, continuing anyway.")
+                break
+            time.sleep(0.5)
+    except Exception as e:
+        print(f"Auto GUIDED/ARM/TAKEOFF failed: {e}")
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((CMD_LISTEN_IP, CMD_LISTEN_PORT))
     print(f"Komut dinleniyor: {CMD_LISTEN_IP}:{CMD_LISTEN_PORT} -> {CONNECTION_STRING}")
@@ -87,3 +120,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
