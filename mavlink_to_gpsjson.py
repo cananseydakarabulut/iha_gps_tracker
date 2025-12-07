@@ -1,5 +1,5 @@
 # Bridge: MAVLink (SITL/QGC) -> gps.py JSON UDP (127.0.0.1:5799)
-# gps.py'ya dokunmadan, MAVLink'ten okuduğunuzu onun beklediği formata çevirir.
+# gps.py'ya dokunmadan, MAVLink'ten okuduunuzu onun bekledii formata evirir.
 import json
 import math
 import socket
@@ -31,7 +31,7 @@ def _build_imu(hr_imu, scaled_imu) -> dict:
             "gyr": [hr_imu.xgyro, hr_imu.ygyro, hr_imu.zgyro],
         }
     if scaled_imu:
-        # scaled_imu: mg ve mrad/s, yaklaşık m/s^2 ve rad/s'e çevir
+        # scaled_imu: mg ve mrad/s, yaklak m/s^2 ve rad/s'e evir
         return {
             "acc": [scaled_imu.xacc / 1000.0 * 9.81, scaled_imu.yacc / 1000.0 * 9.81, scaled_imu.zacc / 1000.0 * 9.81],
             "gyr": [scaled_imu.xgyro / 1000.0, scaled_imu.ygyro / 1000.0, scaled_imu.zgyro / 1000.0],
@@ -52,6 +52,10 @@ def _build_gps(gpos, vfr) -> Optional[dict]:
     speed_ms = math.sqrt(vx * vx + vy * vy + vz * vz)
     if vfr:
         speed_ms = max(speed_ms, getattr(vfr, "groundspeed", 0.0))
+
+    # Heading (yönelim) hesapla
+    heading = gpos.hdg / 100.0 if hasattr(gpos, "hdg") and gpos.hdg != 65535 else 0.0
+
     return {
         "is_valid": True,
         "lat": lat,
@@ -59,22 +63,34 @@ def _build_gps(gpos, vfr) -> Optional[dict]:
         "alt": alt,
         "speed_ms": speed_ms,
         "ground_speed": speed_ms,
+        "heading": heading,
         "hdop": getattr(gpos, "eph", 1.0) if hasattr(gpos, "eph") else 1.0,
     }
 
 
 def main():
     import argparse
+    import os
 
     ap = argparse.ArgumentParser(description="MAVLink -> gps.py JSON bridge")
     ap.add_argument(
         "--master",
         default="tcp:127.0.0.1:5770",
-        help="MAVLink master (takipçi/kendi SITL, ornek: tcp:127.0.0.1:5770)",
+        help="MAVLink master (takipi/kendi SITL, ornek: tcp:127.0.0.1:5770)",
     )
-    ap.add_argument("--out-ip", default="127.0.0.1", help="gps.py dinleyen IP (varsayılan 127.0.0.1)")
-    ap.add_argument("--out-port", type=int, default=5799, help="gps.py dinleyen port (varsayılan 5799)")
+    ap.add_argument("--out-ip", default="127.0.0.1", help="gps.py dinleyen IP (varsaylan 127.0.0.1)")
+    ap.add_argument("--out-port", type=int, default=None, help="gps.py dinleyen port (varsayilan: 5799 + VEHICLE_ID - 1)")
+    ap.add_argument("--vehicle-id", type=int, default=None, help="IHA ID (VEHICLE_ID ortam değişkeninden okunur)")
     args = ap.parse_args()
+
+    # Vehicle ID belirle (argüman > ortam değişkeni > varsayılan)
+    vehicle_id = args.vehicle_id if args.vehicle_id is not None else int(os.getenv("VEHICLE_ID", "1"))
+
+    # Port belirle
+    if args.out_port is None:
+        args.out_port = 5799 + vehicle_id - 1  # IHA-1: 5799, IHA-2: 5800, vb.
+
+    print(f"[bridge] IHA ID: {vehicle_id} -> UDP Port: {args.out_port}")
 
     m = _connect(args.master)
 

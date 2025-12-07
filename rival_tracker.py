@@ -5,41 +5,45 @@ from dataclasses import dataclass
 import numpy as np
 
 from geo_utils import llh_to_enu
+from tactical_modules import RivalBehaviorMemory, MultiTargetOptimizer
 
 # ==========================
 # AYARLAR
 # ==========================
-MY_TEAM_ID = 1  # kendi takım numaran
-MAX_RIVAL_SPEED = 70.0  # m/s hız patlamasını engelle
+MAX_RIVAL_SPEED = 70.0  # m/s hz patlamasn engelle
 
-# Hedef puanlama katsayıları (4.1.2 formül referansı)
+# Hedef puanlama katsaylar (4.1.2 forml referans)
 DEFAULT_SCORING_WEIGHTS = {
-    "w_h": 0.6,         # irtifa farkı (|h_H - h_G|)
-    "w_d": 0.25,        # yatay mesafe
-    "w_heading": 0.12,  # b_GH
-    "w_inv_speed": 15.0 # 1 / V_H
+    "w_h": 0.5,         # irtifa fark (|h_H - h_G|) - metre cinsinden
+    "w_d": 0.003,       # yatay mesafe - metre cinsinden (ornek: 100m = 0.3 puan)
+    "w_heading": 0.01,  # yonelim farki - derece cinsinden (ornek: 45deg = 0.45 puan)
+    "w_inv_speed": 2.0  # 1 / V_H - yavas hedeflere bonus (ornek: 10m/s = 0.2 puan)
 }
-MIN_INV_SPEED = 1.0  # 1/V hesaplarında sıfır bölünmemeleri için
+MIN_INV_SPEED = 5.0  # Cok yavas hedefleri fazla tercih etmemek icin (m/s)
 
 
 # ==========================
-# GÜÇLENDİRİLMİŞ 5D ÖLÇÜMLÜ UKF
+# GLENDRLM 5D LML UKF
 # ==========================
 class UnscentedKalmanFilter:
     """
-    NONLINEAR 7D UKF (x, y, z, v, psi, psi_dot, vz)
+    NONLINEAR 10D UKF (x, y, z, v, psi, psi_dot, vz, ax, ay, az)
 
-    Ölçüm vektörü: [x, y, z, v, psi] (5 boyut)
+    State vektoru: [x, y, z, v, psi, psi_dot, vz, ax, ay, az]
+    Olcum vektoru: [x, y, z, v, psi] (5 boyut)
+
+    ax, ay: Yatay duzlemde ivme (m/s^2)
+    az: Dikey ivme (m/s^2)
     """
 
     def __init__(self, x0, y0, z0, v0, psi0):
-        self.n = 7
-        # Durum: [x, y, z, v, psi, psi_dot, vz]
-        self.x = np.array([x0, y0, z0, v0, psi0, 0.0, 0.0], dtype=float)
+        self.n = 10
+        # Durum: [x, y, z, v, psi, psi_dot, vz, ax, ay, az]
+        self.x = np.array([x0, y0, z0, v0, psi0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
 
         self.P = np.eye(self.n) * 10.0  # belirsizlik
 
-        # Süreç gürültüsü (Q)
+        # Sre grlts (Q)
         self.Q = np.diag([
             0.5,    # x
             0.5,    # y
@@ -47,10 +51,13 @@ class UnscentedKalmanFilter:
             2.0,    # v
             0.1,    # psi
             0.05,   # psi_dot
-            1.0     # vz
+            1.0,    # vz
+            0.8,    # ax - yatay ivme belirsizligi
+            0.8,    # ay - yatay ivme belirsizligi
+            0.6     # az - dikey ivme belirsizligi (daha az değişken)
         ])
 
-        # Ölçüm gürültüsü (R)
+        # lm grlts (R)
         self.R = np.diag([
             5.0,    # x
             5.0,    # y
@@ -72,28 +79,60 @@ class UnscentedKalmanFilter:
         self.Wc[0] = self.lambda_ / (self.n + self.lambda_) + (1 - self.alpha**2 + self.beta)
 
     def f(self, x, dt: float):
-        """CTRV hareket modeli"""
-        px, py, pz, v, psi, psi_dot, vz = x
+        """
+        CTRV + 3D Ivme hareket modeli
+        State: [x, y, z, v, psi, psi_dot, vz, ax, ay, az]
+        """
+        px, py, pz, v, psi, psi_dot, vz, ax, ay, az = x
 
         if dt <= 0:
             return x
 
-        if abs(psi_dot) > 0.001:
-            px_new = px + (v / psi_dot) * (math.sin(psi + psi_dot * dt) - math.sin(psi))
-            py_new = py + (v / psi_dot) * (math.cos(psi) - math.cos(psi + psi_dot * dt))
+        # Ivme ile hiz guncellemesi
+        # v_new = sqrt(vx^2 + vy^2), ivme eklenince degisir
+        vx = v * math.cos(psi)
+        vy = v * math.sin(psi)
+
+        vx_new = vx + ax * dt
+        vy_new = vy + ay * dt
+        v_new = math.sqrt(vx_new**2 + vy_new**2)
+
+        # Yeni yonelim (ivme yonelimi degistirebilir)
+        if v_new > 0.5:  # Yeterince hizli ise
+            psi_from_velocity = math.atan2(vy_new, vx_new)
+            # Eski psi ile yeni psi'yi karistir (smooth transition)
+            psi_blend = 0.3  # 30% yeni, 70% eski
+            psi_new = psi + psi_dot * dt
+            psi_new = (1 - psi_blend) * psi_new + psi_blend * psi_from_velocity
         else:
-            px_new = px + v * math.cos(psi) * dt
-            py_new = py + v * math.sin(psi) * dt
+            psi_new = psi + psi_dot * dt
 
-        pz_new = pz + vz * dt
-        psi_new = psi + psi_dot * dt
+        # Konum guncellemesi (ivme dahil)
+        if abs(psi_dot) > 0.001:
+            # Donme hareketi
+            px_new = px + (v / psi_dot) * (math.sin(psi + psi_dot * dt) - math.sin(psi)) + 0.5 * ax * dt**2
+            py_new = py + (v / psi_dot) * (math.cos(psi) - math.cos(psi + psi_dot * dt)) + 0.5 * ay * dt**2
+        else:
+            # Duz hareket
+            px_new = px + v * math.cos(psi) * dt + 0.5 * ax * dt**2
+            py_new = py + v * math.sin(psi) * dt + 0.5 * ay * dt**2
 
+        # Dikey hareket (ivme dahil)
+        pz_new = pz + vz * dt + 0.5 * az * dt**2
+        vz_new = vz + az * dt
+
+        # Aci normalizasyonu
         psi_new = (psi_new + math.pi) % (2 * math.pi) - math.pi
 
-        return np.array([px_new, py_new, pz_new, v, psi_new, psi_dot, vz])
+        # Ivme azalma (drag benzeri) - manevra bittikten sonra ivme sifira donme egilimi
+        ax_new = ax * 0.9
+        ay_new = ay * 0.9
+        az_new = az * 0.85  # Dikey ivme daha hızlı sönümlenir
+
+        return np.array([px_new, py_new, pz_new, v_new, psi_new, psi_dot, vz_new, ax_new, ay_new, az_new])
 
     def h(self, x):
-        """Ölçüm modeli"""
+        """lm modeli"""
         return np.array([x[0], x[1], x[2], x[3], x[4]])
 
     def _sigma_points(self):
@@ -186,7 +225,7 @@ class UnscentedKalmanFilter:
         self.P = self.P - K @ S @ K.T
         self.P = (self.P + self.P.T) / 2.0
 
-        # Hız patlamasını frenle
+        # Hz patlamasn frenle
         v_mag = abs(self.x[3])
         if v_mag > MAX_RIVAL_SPEED:
             self.x[3] = math.copysign(MAX_RIVAL_SPEED, self.x[3])
@@ -199,10 +238,11 @@ class UnscentedKalmanFilter:
 # RIVAL TRACKER - TEKNOFEST FULL PARSER
 # ==================================================
 class RivalTracker:
-    def __init__(self, ref_lat, ref_lon, ref_h, scoring_weights=None):
+    def __init__(self, ref_lat, ref_lon, ref_h, my_team_id=2, scoring_weights=None):
         self.ref_lat = ref_lat
         self.ref_lon = ref_lon
         self.ref_h = ref_h
+        self.my_team_id = my_team_id  # Kendi takım ID'miz
 
         self.filters = {}
         self.ignored = set()
@@ -210,19 +250,25 @@ class RivalTracker:
         self.last_update_time = {}
         self.history = {}  # tid -> deque(t, x, y, z, v, psi, vz)
 
-        # Rakip tutumunu (pitch/roll) saklamak için
+        # Rakip tutumunu (pitch/roll) saklamak iin
         self.rival_attitude = {}
 
-        # Puanlama katsayıları
+        # Puanlama katsaylar
         self.weights = dict(DEFAULT_SCORING_WEIGHTS)
         if scoring_weights:
             self.weights.update(scoring_weights)
 
+        # Taktiksel modüller (tek sefer tanımla)
+        self.behavior_memory = RivalBehaviorMemory()
+        self.multi_target_optimizer = MultiTargetOptimizer()
+
+        print(f"[RivalTracker] Kendi takim ID: {self.my_team_id}")
+
     def update_from_server_response(self, data):
         """
-        Teknofest verilerini işler:
+        Teknofest verilerini iler:
         - iha_enlem, iha_boylam, iha_irtifa -> konum
-        - iha_hiz -> hız
+        - iha_hiz -> hz
         - iha_yonelme -> yaw
         - iha_dikilme, iha_yatis -> pitch, roll
         """
@@ -230,7 +276,7 @@ class RivalTracker:
 
         for pkt in data:
             tid = pkt.get("takim_numarasi")
-            if tid is None or tid == MY_TEAM_ID:
+            if tid is None or tid == self.my_team_id:
                 continue
 
             try:
@@ -250,11 +296,48 @@ class RivalTracker:
             x, y, z = llh_to_enu(lat, lon, alt, self.ref_lat, self.ref_lon, self.ref_h)
             vz_est = 0.0
 
+            # History'den ivme tahmini (3D)
+            hist = self.history.setdefault(tid, deque(maxlen=50))
+            ax_est = 0.0
+            ay_est = 0.0
+            az_est = 0.0
+
+            if len(hist) >= 2:
+                # Son iki olcumden ivme hesapla
+                t2, x2, y2, z2, v2, psi2, vz2 = hist[-1]
+                t1, x1, y1, z1, v1, psi1, vz1 = hist[-2]
+
+                dt_hist = max(1e-3, t2 - t1)
+
+                # Yatay hiz vektorleri
+                vx2 = v2 * math.cos(psi2)
+                vy2 = v2 * math.sin(psi2)
+                vx1 = v1 * math.cos(psi1)
+                vy1 = v1 * math.sin(psi1)
+
+                # Yatay ivme tahmini
+                ax_est = (vx2 - vx1) / dt_hist
+                ay_est = (vy2 - vy1) / dt_hist
+
+                # Dikey ivme tahmini
+                az_est = (vz2 - vz1) / dt_hist
+
+                # Ivme limitleme (mantikli degerler icin)
+                ax_est = np.clip(ax_est, -10.0, 10.0)
+                ay_est = np.clip(ay_est, -10.0, 10.0)
+                az_est = np.clip(az_est, -8.0, 8.0)  # Dikey ivme daha sınırlı
+
+            # Dikey hiz tahmini
+            if len(hist) >= 1:
+                last_t, _, _, last_z, _, _, _ = hist[-1]
+                dt_z = max(1e-3, now - last_t)
+                vz_est = (z - last_z) / dt_z
+                vz_est = np.clip(vz_est, -10.0, 10.0)
+
             # UKF
             if tid not in self.filters:
                 self.filters[tid] = UnscentedKalmanFilter(x, y, z, speed_ms, yaw_rad)
                 self.last_update_time[tid] = now
-                self.history[tid] = deque(maxlen=50)
             else:
                 dt = now - self.last_update_time.get(tid, now)
                 if dt < 0.001:
@@ -263,13 +346,15 @@ class RivalTracker:
                 self.filters[tid].predict(dt)
                 self.filters[tid].update([x, y, z, speed_ms, yaw_rad])
 
-                self.last_update_time[tid] = now
+                # 3D Ivme tahminini UKF state'ine enjekte et
+                if ax_est != 0.0 or ay_est != 0.0 or az_est != 0.0:
+                    # Mevcut ivme ile yeni ivmeyi harmanlayalim (smooth)
+                    blend = 0.3  # 30% yeni, 70% eski
+                    self.filters[tid].x[7] = (1 - blend) * self.filters[tid].x[7] + blend * ax_est
+                    self.filters[tid].x[8] = (1 - blend) * self.filters[tid].x[8] + blend * ay_est
+                    self.filters[tid].x[9] = (1 - blend) * self.filters[tid].x[9] + blend * az_est
 
-            hist = self.history.setdefault(tid, deque(maxlen=50))
-            if len(hist) >= 1:
-                last_t, _, _, last_z, _, _, _ = hist[-1]
-                dt_z = max(1e-3, now - last_t)
-                vz_est = (z - last_z) / dt_z
+                self.last_update_time[tid] = now
 
             hist.append((now, x, y, z, speed_ms, yaw_rad, vz_est))
 
@@ -278,12 +363,12 @@ class RivalTracker:
 
     def ignore_rival(self, tid):
         self.ignored.add(tid)
-        print(f"Rakip {tid} VURULDU (listeden çıkarıldı).")
+        print(f"Rakip {tid} VURULDU (listeden karld).")
 
     def report_lock_event(self, tid):
         """
-        Görsel kilit tamamlandığında rakibi tek seferlik olarak ignore set'ine atar.
-        Aynı rakibe ikinci kez vurulduysa False döner.
+        Grsel kilit tamamlandnda rakibi tek seferlik olarak ignore set'ine atar.
+        Ayn rakibe ikinci kez vurulduysa False dner.
         """
         if tid in self.ignored:
             return False
@@ -296,6 +381,9 @@ class RivalTracker:
         best_score = -float("inf")
         my_heading_deg = (my_heading_deg if my_heading_deg is not None else 0.0) % 360.0
         my_pos = (my_x, my_y, my_z)
+        my_dist_from_center = math.sqrt(my_x**2 + my_y**2)
+        ARENA_RADIUS = 500.0
+        SAFE_ZONE = 450.0
 
         for tid, ukf in self.filters.items():
             if tid in self.ignored:
@@ -308,10 +396,22 @@ class RivalTracker:
             v = s[3]
             psi = s[4]
             vz = s[6]
+            ax = s[7] if len(s) > 7 else 0.0  # Yatay ivme bilgisi
+            ay = s[8] if len(s) > 8 else 0.0
+            az = s[9] if len(s) > 9 else 0.0  # Dikey ivme bilgisi
+
+            target_dist_from_center = math.sqrt(px**2 + py**2)
+            if target_dist_from_center > ARENA_RADIUS:
+                continue
 
             lag = self.latest_lag_s.get(tid, 0.1)
             dt_future = lag + (now - self.last_update_time[tid])
-            px_f, py_f, pz_f, v_f = self._predict_future(tid, (px, py, pz, v, psi, vz), dt_future)
+            # 3D Ivme bilgisini de gonder
+            px_f, py_f, pz_f, v_f = self._predict_future(tid, (px, py, pz, v, psi, vz, ax, ay, az), dt_future)
+
+            predicted_dist_from_center = math.sqrt(px_f**2 + py_f**2)
+            if predicted_dist_from_center > ARENA_RADIUS:
+                continue
 
             dist = math.sqrt((px_f - my_x) ** 2 + (py_f - my_y) ** 2 + (pz_f - my_z) ** 2)
 
@@ -330,6 +430,7 @@ class RivalTracker:
                     "z": pz_f,
                     "hiz": math.sqrt(v_f * v_f + vz * vz),
                     "yaw_deg": yaw_deg,
+                    "yaw_rate": self._estimate_yaw_rate(tid),
                     "pitch_deg": att["pitch"],
                     "roll_deg": att["roll"],
                     "dist": dist,
@@ -342,56 +443,50 @@ class RivalTracker:
         return best
 
     # -------------------------------------------------------------
-    # Yardımcılar
+    # Yardmclar
     # -------------------------------------------------------------
     def _predict_future(self, tid, state, dt_future: float):
         """
-        Basit sabit hız + yön. İmkân varsa son iki hızdan ivme tahmin edip
-        0.5*a*t^2 ile projeksiyon yapar; hız sınırı korunur.
+        UKF state'inden gelen 3D ivme bilgisi ile gelecek konumu tahmin eder.
+        State: (px, py, pz, v, psi, vz, ax, ay, az)
         """
-        px, py, pz, v, psi, vz = state
-        hist = self.history.get(tid, None)
+        if len(state) == 6:
+            # Eski format (ivme yok)
+            px, py, pz, v, psi, vz = state
+            ax = ay = az = 0.0
+        elif len(state) == 8:
+            # Orta format (sadece yatay ivme)
+            px, py, pz, v, psi, vz, ax, ay = state
+            az = 0.0
+        else:
+            # Yeni format (3D ivme var)
+            px, py, pz, v, psi, vz, ax, ay, az = state
 
-        # Varsayılan sabit hız (UKF state)
-        vx, vy = v * math.cos(psi), v * math.sin(psi)
-        ax = ay = az = 0.0
+        # Yatay hiz vektorleri
+        vx = v * math.cos(psi)
+        vy = v * math.sin(psi)
 
-        if hist and len(hist) >= 2:
-            t2, x2, y2, z2, _, _, _ = hist[-1]
-            t1, x1, y1, z1, _, _, _ = hist[-2]
-            dt = max(1e-3, t2 - t1)
-            vx = (x2 - x1) / dt
-            vy = (y2 - y1) / dt
-            vz = (z2 - z1) / dt
+        # 3D Ivmeli projeksiyon (kinematics: x = x0 + v*t + 0.5*a*t^2)
+        px_f = px + vx * dt_future + 0.5 * ax * dt_future**2
+        py_f = py + vy * dt_future + 0.5 * ay * dt_future**2
+        pz_f = pz + vz * dt_future + 0.5 * az * dt_future**2  # Dikey ivme dahil
 
-            # İvme tahmini için bir adım daha geriye bak
-            if len(hist) >= 3:
-                t0, x0, y0, z0, _, _, _ = hist[-3]
-                dt_prev = max(1e-3, t1 - t0)
-                vx_prev = (x1 - x0) / dt_prev
-                vy_prev = (y1 - y0) / dt_prev
-                vz_prev = (z1 - z0) / dt_prev
-
-                dt_vel = max(1e-3, t2 - t0)
-                ax = (vx - vx_prev) / dt_vel
-                ay = (vy - vy_prev) / dt_vel
-                az = (vz - vz_prev) / dt_vel
-
-        # İvmeli projeksiyon
-        px_f = px + vx * dt_future + 0.5 * ax * dt_future * dt_future
-        py_f = py + vy * dt_future + 0.5 * ay * dt_future * dt_future
-        pz_f = pz + vz * dt_future + 0.5 * az * dt_future * dt_future
-
+        # Gelecekteki hiz (3D)
         vx_f = vx + ax * dt_future
         vy_f = vy + ay * dt_future
         vz_f = vz + az * dt_future
 
-        speed_mag = math.sqrt(vx_f * vx_f + vy_f * vy_f + vz_f * vz_f)
+        # Toplam hiz buyuklugu
+        speed_mag = math.sqrt(vx_f**2 + vy_f**2 + vz_f**2)
+
+        # Hiz limiti
         if speed_mag > MAX_RIVAL_SPEED:
             scale = MAX_RIVAL_SPEED / speed_mag
-            vx_f, vy_f, vz_f = vx_f * scale, vy_f * scale, vz_f * scale
+            vx_f *= scale
+            vy_f *= scale
+            vz_f *= scale
 
-        v_f = math.sqrt(vx_f * vx_f + vy_f * vy_f + vz_f * vz_f)
+        v_f = math.sqrt(vx_f**2 + vy_f**2 + vz_f**2)
         return px_f, py_f, pz_f, v_f
 
     def _velocity_variability(self, tid):
@@ -415,10 +510,20 @@ class RivalTracker:
             return 0.0
         return float(np.std(speeds))
 
+    def _estimate_yaw_rate(self, tid):
+        hist = self.history.get(tid)
+        if not hist or len(hist) < 2:
+            return 0.0
+        t2, _, _, _, _, yaw2, _ = hist[-1]
+        t1, _, _, _, _, yaw1, _ = hist[-2]
+        dt = max(1e-3, t2 - t1)
+        yaw_rate = (yaw2 - yaw1) / dt
+        return math.degrees(yaw_rate)
+
     def _score_candidate(self, my_pos, my_heading_deg, px_f, py_f, pz_f, v_f, yaw_deg):
         """
-        4.1.2 formüllerine göre puan hesaplar.
-        Dönecek değer: 1 / (1 + (P_h + P_d + P_BV))
+        4.1.2 formllerine gre puan hesaplar.
+        Dnecek deer: 1 / (1 + (P_h + P_d + P_BV))
         """
         h_diff = abs(my_pos[2] - pz_f)
         d_xy = math.hypot(px_f - my_pos[0], py_f - my_pos[1])
@@ -441,4 +546,4 @@ class RivalTracker:
         }
 
 
-__all__ = ["RivalTracker", "MY_TEAM_ID"]
+__all__ = ["RivalTracker"]

@@ -13,26 +13,26 @@ from quaternion_utils import (
 )
 
 # ==============================================================================
-# 1. FİZİKSEL HAREKET MODELİ (FX) - (HIZ PATLAMASI DÜZELTİLDİ)
+# 1. FZKSEL HAREKET MODEL (FX) - (HIZ PATLAMASI DZELTLD)
 # ==============================================================================
 def fx(x, dt, u, g_enu=np.array([0, 0, -9.81])):
     """
-    Durum geçiş fonksiyonu.
+    Durum gei fonksiyonu.
     """
     x_new = x.copy()
 
-    # IMU Verilerini Ayır
+    # IMU Verilerini Ayr
     a_body_meas = u[0:3]
     w_body_meas = u[3:6]
 
-    # Biasları Çıkar
+    # Biaslar kar
     b_w = x[10:13]
     b_a = x[13:16]
 
     w_true = w_body_meas - b_w
     a_body_true = a_body_meas - b_a
 
-    # --- 1. Quaternion (Açı) Güncellemesi ---
+    # --- 1. Quaternion (A) Gncellemesi ---
     q_old = x[3:7]
     omega_quat = np.concatenate(([0.0], w_true))
 
@@ -47,27 +47,29 @@ def fx(x, dt, u, g_enu=np.array([0, 0, -9.81])):
 
     x_new[3:7] = q_new
 
-    # --- 2. Hız ve Konum Güncellemesi ---
+    # --- 2. Hz ve Konum Gncellemesi ---
     R_BODY_TO_ENU = q_to_rot_matrix(q_new)
     a_ENU = R_BODY_TO_ENU @ a_body_true - g_enu
 
-    # ⭐ PATCH 1: İvme Limitleme (Senin kodundaki mantık aynen duruyor)
+    #  PATCH 1: vme Limitleme (Senin kodundaki mantk aynen duruyor)
     a_ENU = np.clip(a_ENU, -30.0, 30.0)
 
-    # Küçük ivmeyi yok say (deadband), gereksiz hız artışı olmasın
+    # Kk ivmeyi yok say (deadband), gereksiz hz art olmasn
+    # 0.5 -> 0.2 m/s² (daha hassas, düşük manevralara tepki verir)
     a_norm = np.linalg.norm(a_ENU)
-    if a_norm < 0.5:
+    if a_norm < 0.2:
         a_ENU = np.zeros(3)
 
     v_old = x[7:10]
     p_old = x[0:3]
 
-    # Hız modeli: ivme varsa ekle, yoksa sabit hız + hafif sönüm
+    # Hz modeli: ivme varsa ekle, yoksa sabit hz + hafif snm
     dv = a_ENU * dt
     dv_norm = np.linalg.norm(dv)
-    max_dv = 8.0  # tek adımda izin verilen en büyük hız değişimi (m/s)
+    max_dv = 8.0  # tek admda izin verilen en byk hz deiimi (m/s)
 
-    if dv_norm < 0.5:
+    # 0.5 -> 0.1 m/s (daha hassas hız değişimi algılama)
+    if dv_norm < 0.1:
         dv = np.zeros(3)
     elif dv_norm > max_dv:
         dv = dv * (max_dv / dv_norm)
@@ -75,7 +77,7 @@ def fx(x, dt, u, g_enu=np.array([0, 0, -9.81])):
     vel_decay = 0.995  # hafif drag benzeri etki
     v_new = v_old * vel_decay + dv
 
-    # Konum hesabında ivmeyi kullanmaya devam edebiliriz (kısa anlık tepki için)
+    # Konum hesabnda ivmeyi kullanmaya devam edebiliriz (ksa anlk tepki iin)
     p_new = p_old + v_old * dt + 0.5 * a_ENU * dt**2
 
     x_new[0:3] = p_new
@@ -85,11 +87,11 @@ def fx(x, dt, u, g_enu=np.array([0, 0, -9.81])):
 
 
 # ==============================================================================
-# 2. ÖLÇÜM MODELİ (HX) - (HIZ BÜYÜKLÜĞÜ EKLENDİ)
+# 2. LM MODEL (HX) - (HIZ BYKL EKLEND)
 # ==============================================================================
 def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     """
-    Ölçüm fonksiyonu.
+    lm fonksiyonu.
     """
 
     z_gps = x[0:3]
@@ -99,7 +101,7 @@ def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     R_BODY_TO_ENU = q_to_rot_matrix(q)
     R_ENU_TO_BODY = R_BODY_TO_ENU.T
 
-    # Sabit hız varsayımı (a_real = 0)
+    # Sabit hz varsaym (a_real = 0)
     a_real = np.zeros(3)
 
     # Yeni ivme modeli
@@ -108,7 +110,7 @@ def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     # Manyetometre tahmini
     z_mag = R_ENU_TO_BODY @ m_ref
 
-    # Ground speed büyüklüğü
+    # Ground speed bykl
     speed_mag = np.linalg.norm(x[7:10])
 
     return np.concatenate((z_gps, z_acc, z_mag, [speed_mag]))
@@ -145,8 +147,8 @@ class KF3D_UKF:
  
     def initialize_from_pos(self, pos_enu, v_init=None):
         """
-        UKF Başlatıcı.
-        v_init: Eğer elinde başlangıç hızı varsa (np.array([vx, vy, vz])) buraya ver.
+        UKF Balatc.
+        v_init: Eer elinde balang hz varsa (np.array([vx, vy, vz])) buraya ver.
                 Yoksa None ver, P matrisi sayesinde otomatik bulacak.
         """
         self.x = np.zeros((16, 1))
@@ -154,33 +156,33 @@ class KF3D_UKF:
         # 1. Konumu ayarla
         self.x[0:3, 0] = pos_enu
         
-        # 2. Açıyı sıfırla (veya elinde varsa onu da ver)
+        # 2. Ay sfrla (veya elinde varsa onu da ver)
         self.x[3:7, 0] = angle_to_q(0, 0, 0) 
 
-        # 3. HIZ AYARI (HIZLI TEPKİ İÇİN)
+        # 3. HIZ AYARI (HIZLI TEPK N)
         if v_init is not None:
-            # Eğer elinde yaklaşık hız varsa (örn: 33 m/s), direkt onu ver
+            # Eer elinde yaklak hz varsa (rn: 33 m/s), direkt onu ver
             self.x[7:10, 0] = v_init
         else:
-            # Hız yoksa 0 başlat
+            # Hz yoksa 0 balat
             self.x[7:10, 0] = 0
 
         self.x[10:13, 0] = 0 # Biaslar
         self.x[13:16, 0] = 0 # Biaslar
 
         # =====================================================
-        # ⭐ SİHİRLİ DOKUNUŞ: BELİRSİZLİK MATRİSİ (P) AYARI
+        #  SHRL DOKUNU: BELRSZLK MATRS (P) AYARI
         # =====================================================
         self.P = np.eye(self.L_err) * 1.0
         
-        # Hız Belirsizliğini (Variance) ÇOK YÜKSEK yapıyoruz (1000.0).
-        # Bu sayede UKF, ilk ölçümde "hızım 0'mış" demez, GPS ne diyorsa ona atlar.
-        self.P[6, 6] = 1000.0  # Vx belirsizliği
-        self.P[7, 7] = 1000.0  # Vy belirsizliği
-        self.P[8, 8] = 1000.0  # Vz belirsizliği
+        # Hz Belirsizliini (Variance) OK YKSEK yapyoruz (1000.0).
+        # Bu sayede UKF, ilk lmde "hzm 0'm" demez, GPS ne diyorsa ona atlar.
+        self.P[6, 6] = 1000.0  # Vx belirsizlii
+        self.P[7, 7] = 1000.0  # Vy belirsizlii
+        self.P[8, 8] = 1000.0  # Vz belirsizlii
 
         self.initialized = True
-        print(f"🔧 UKF Başlatıldı (Hızlı Adaptasyon Modu). Konum: {pos_enu}")
+        print(f" UKF Balatld (Hzl Adaptasyon Modu). Konum: {pos_enu}")
 
     # ----------------------------------------------------
     def _Q(self, dt):
@@ -265,7 +267,7 @@ class KF3D_UKF:
         x_new = (X_pred @ self.Wm).reshape(16,1)
         x_new[3:7,0] = q_average(X_pred, self.Wm)
 
-        # ⭐ PATCH 3: Hız Limitleme (Aynen korundu)
+        #  PATCH 3: Hz Limitleme (Aynen korundu)
         speed_mag = np.linalg.norm(x_new[7:10])
         MAX_SPEED = 80.0
         if speed_mag > MAX_SPEED:
@@ -367,7 +369,7 @@ class KF3D_UKF:
         K = P_xz @ S_inv
         delta = K @ y
         
-        # ⭐ PATCH 2: Delta (Değişim) Hızını Kırpma (Aynen korundu)
+        #  PATCH 2: Delta (Deiim) Hzn Krpma (Aynen korundu)
         delta[6:9] = np.clip(delta[6:9], -5.0, 5.0)
 
         self.x[0:3] += delta[0:3]
@@ -388,13 +390,23 @@ class KF3D_UKF:
         self.P = (self.P + self.P.T)/2.0
         self.P += np.eye(self.L_err) * 1e-9
 
-        # Hız limiti (ölçüm güncellemesinden sonra da uygula)
+        # Hz limiti (lm gncellemesinden sonra da uygula)
         speed_mag = np.linalg.norm(self.x[7:10])
         MAX_SPEED = 80.0
         if speed_mag > MAX_SPEED:
             self.x[7:10] *= (MAX_SPEED / speed_mag)
 
         return True
+
+    # Basit getter'lar (GPS kodu icin)
+    def get_velocity_3d(self):
+        """Return velocity vector (vx, vy, vz) in ENU."""
+        return float(self.x[7]), float(self.x[8]), float(self.x[9])
+
+    def get_speed(self):
+        """Return scalar speed magnitude."""
+        v = self.get_velocity_3d()
+        return math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
 
 
 __all__ = ["KF3D_UKF", "fx", "hx"]

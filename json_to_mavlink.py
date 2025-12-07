@@ -1,5 +1,5 @@
-# Bridge: gps.py JSON komutları (UDP 5771) -> MAVLink velocity/alt setpoint
-# gps.py'ya dokunmadan ArduPilot'a komut iletmek için kullanılır.
+# Bridge: gps.py JSON komutlar (UDP 5771) -> MAVLink velocity/alt setpoint
+# gps.py'ya dokunmadan ArduPilot'a komut iletmek iin kullanlr.
 import json
 import math
 import socket
@@ -27,16 +27,27 @@ def recv_json(sock) -> Optional[dict]:
 
 def main():
     import argparse
+    import os
 
     ap = argparse.ArgumentParser(description="gps.py JSON -> MAVLink bridge")
     ap.add_argument("--listen-ip", default="127.0.0.1", help="gps.py komut IP (vars: 127.0.0.1)")
-    ap.add_argument("--listen-port", type=int, default=5771, help="gps.py komut port (vars: 5771)")
+    ap.add_argument("--listen-port", type=int, default=None, help="gps.py komut port (varsayilan: 5771 + VEHICLE_ID - 1)")
+    ap.add_argument("--vehicle-id", type=int, default=None, help="IHA ID (VEHICLE_ID ortam değişkeninden okunur)")
     ap.add_argument(
         "--master",
         default="tcp:127.0.0.1:5770",
-        help="MAVLink master (takipçi SITL, örn: tcp:127.0.0.1:5770)",
+        help="MAVLink master (takipi SITL, rn: tcp:127.0.0.1:5770)",
     )
     args = ap.parse_args()
+
+    # Vehicle ID belirle (argüman > ortam değişkeni > varsayılan)
+    vehicle_id = args.vehicle_id if args.vehicle_id is not None else int(os.getenv("VEHICLE_ID", "1"))
+
+    # Port belirle
+    if args.listen_port is None:
+        args.listen_port = 5771 + vehicle_id - 1  # IHA-1: 5771, IHA-2: 5772, vb.
+
+    print(f"[json->mav] IHA ID: {vehicle_id} -> UDP Port: {args.listen_port}")
 
     m = connect_master(args.master)
 
@@ -48,7 +59,7 @@ def main():
     last_recv = 0.0
 
     while True:
-        # MAVLink'ten pozisyonu güncelle
+        # MAVLink'ten pozisyonu gncelle
         msg = m.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT"], blocking=False, timeout=0.01)
         if msg and msg.get_type() == "GLOBAL_POSITION_INT":
             last_pos = (
@@ -63,7 +74,7 @@ def main():
             continue
         last_recv = now
 
-        # cmd formatı: {"yaw": deg, "speed": m/s, "alt": m, ...}
+        # cmd format: {"yaw": deg, "speed": m/s, "alt": m, ...}
         yaw_deg = float(cmd.get("yaw", 0.0))
         speed = float(cmd.get("speed", 0.0))
         alt_cmd = float(cmd.get("alt", 0.0))
@@ -111,7 +122,7 @@ def main():
         except Exception as exc:
             print(f"[json->mav] send error: {exc}")
 
-        # Bağlantı hayatta kalsın diye arada heartbeat dinle
+        # Balant hayatta kalsn diye arada heartbeat dinle
         if (now - last_recv) > 1.0:
             m.recv_match(type="HEARTBEAT", blocking=False, timeout=0.01)
 

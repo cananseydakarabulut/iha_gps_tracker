@@ -1,5 +1,22 @@
+import os
 from dataclasses import dataclass
 from scipy.stats import chi2
+
+
+@dataclass
+class VehicleConfig:
+    """İHA kimlik ve takım bilgileri"""
+    # Kendi İHA ID'miz (ortam değişkeninden veya varsayılan)
+    vehicle_id: int = int(os.getenv("VEHICLE_ID", "1"))
+
+    # Kendi takım numaramız (ortam değişkeninden veya varsayılan)
+    team_id: int = int(os.getenv("MY_TEAM_ID", "2"))
+
+    # İHA tipi (plane, copter, vtol)
+    vehicle_type: str = os.getenv("VEHICLE_TYPE", "plane")
+
+    # Sürüm bilgisi
+    version: str = "1.0.0"
 
 
 @dataclass
@@ -40,5 +57,5 @@ class SimCfg:
     target_h: float = 950.0
 
 
-__all__ = ["KFConfig", "SimCfg"]
+__all__ = ["VehicleConfig", "KFConfig", "SimCfg"]
 
