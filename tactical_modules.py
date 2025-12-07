@@ -163,13 +163,21 @@ class WindEstimatorAndCompensator:
             return desired_ground_heading_rad
         wind_heading = math.atan2(self.wind_vy, self.wind_vx)
         relative_wind = wind_heading - desired_ground_heading_rad
-        if airspeed > wind_speed:
-            sin_crab = wind_speed * math.sin(relative_wind) / airspeed
+
+        # Rüzgar çok güçlü olsa bile kompanzasyon yap
+        if airspeed > wind_speed * 0.3:  # Minimum %30 hız şartı
+            # Etkili airspeed hesapla (rüzgar güçlüyse daha agresif kompanzasyon)
+            effective_airspeed = max(airspeed, wind_speed * 1.2)
+            sin_crab = wind_speed * math.sin(relative_wind) / effective_airspeed
             sin_crab = float(np.clip(sin_crab, -1, 1))
             crab_angle = math.asin(sin_crab)
+            if wind_speed > airspeed:
+                print(f"Ruzgar guclu (W:{wind_speed:.1f} > A:{airspeed:.1f}), agresif kompanzasyon")
         else:
-            crab_angle = 0.0
-            print("Ruzgar cok guclu, kompanzasyon zor")
+            # Çok düşük hızda - basit yön düzeltmesi
+            crab_angle = -relative_wind * 0.3  # Rüzgara doğru 30% düzeltme
+            print("Cok dusuk hiz, basit kompanzasyon")
+
         compensated_heading = desired_ground_heading_rad + crab_angle
         return compensated_heading
 

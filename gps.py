@@ -87,6 +87,10 @@ def run_receiver_node():
     telemetry_timeout_count = 0
     last_valid_tm = None
 
+    # VZ hesaplama için GPS altitude geçmişi
+    last_gps_alt = None
+    last_gps_time = None
+
     fallback_state = {"x": 0.0, "y": 0.0, "z": 50.0, "speed": 0.0, "yaw": 0.0}
 
     print("Telemetri bekleniyor (2s timeout)...")
@@ -237,8 +241,30 @@ def run_receiver_node():
                 )
 
                 gps_speed = float(tm["gps"].get("speed_ms", tm["gps"].get("ground_speed", my_speed)))
+                gps_heading_deg = float(tm["gps"].get("heading", 0.0))
+                gps_heading_rad = math.radians(gps_heading_deg)
 
-                # UKF ölçüm vektörü: [pos(3), acc_body(3), mag_dummy(3), speed]
+                # Vektörel hız bileşenleri (yatay)
+                gps_vx = gps_speed * math.cos(gps_heading_rad)
+                gps_vy = gps_speed * math.sin(gps_heading_rad)
+
+                # VZ hesaplama - Altitude türevinden
+                current_alt = tm["gps"]["alt"]
+                if last_gps_alt is not None and last_gps_time is not None:
+                    dt_gps = t_now - last_gps_time
+                    if dt_gps > 0.01:  # Minimum zaman farkı kontrolü
+                        vz_gps = (current_alt - last_gps_alt) / dt_gps
+                        # Gürültü filtrele - makul dikey hız limitleri
+                        vz_gps = np.clip(vz_gps, -15.0, 15.0)
+                    else:
+                        vz_gps = 0.0
+                else:
+                    vz_gps = 0.0
+
+                last_gps_alt = current_alt
+                last_gps_time = t_now
+
+                # UKF ölçüm vektörü: [pos(3), acc_body(3), mag_dummy(3), vel(3)]
                 z_full = np.array(
                     [
                         raw_pos[0],
@@ -250,15 +276,17 @@ def run_receiver_node():
                         0.0,
                         0.0,
                         0.0,
-                        gps_speed,
+                        gps_vx,
+                        gps_vy,
+                        vz_gps,
                     ]
                 )
 
                 kf.update(z_full, dt, tm["gps"]["hdop"])
 
-            est_x = float(kf.x[0])
-            est_y = float(kf.x[1])
-            est_z = float(kf.x[2])
+            est_x = float(kf.x[0].item())
+            est_y = float(kf.x[1].item())
+            est_z = float(kf.x[2].item())
 
             vx, vy, vz = kf.get_velocity_3d()
             my_speed = kf.get_speed()
@@ -428,32 +456,35 @@ def run_receiver_node():
                     cmd["alt"] = max(cmd.get("alt", 50.0), 50.0)
                     mode_str = "KILIT | HEDEF KAYIP"
 
-            # Saha disi kontrol
+            # GÜÇLÜ Saha dışı kontrol - ÖNCELİK EN YÜKSEK!
             outside_duration = 0.0
-            if gps_valid:
-                dist_from_center = math.hypot(est_x, est_y)
-                if dist_from_center > SAHA_YARICAPI:
-                    center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
-                    cmd = {
-                        "type": "control",
-                        "yaw": center_yaw,
-                        "speed": 25.0,
-                        "alt": 60.0,
-                        "action": "rtl",
-                    }
-                    mode_str = "SAHA DISI - RTL"
-                    lock_timer_start = None
-                    locking_target_id = None
-            else:
-                if last_valid_xy:
-                    dist_from_center = math.hypot(last_valid_xy[0], last_valid_xy[1])
-                    if dist_from_center > SAHA_YARICAPI:
-                        center_yaw = math.degrees(math.atan2(-last_valid_xy[1], -last_valid_xy[0])) % 360
-                        cmd["yaw"] = center_yaw
-                        cmd["speed"] = 25.0
-                        cmd["alt"] = 50.0
-                        mode_str = "SAHA DISI (GPS YOK) - DON"
-                outside_timer_start = None
+            dist_from_center = math.hypot(est_x, est_y)
+
+            # Kritik saha dışı - ACİL DÖNÜŞ
+            if dist_from_center > SAHA_YARICAPI:
+                center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
+                cmd = {
+                    "type": "control",
+                    "yaw": center_yaw,
+                    "speed": 30.0,  # Daha hızlı geri dön
+                    "alt": 80.0,    # Daha yüksek irtifa (engel önleme)
+                    "action": "rtl",
+                }
+                mode_str = f"🚨 SAHA DIŞI {dist_from_center:.0f}m - ACİL RTL"
+                lock_timer_start = None
+                locking_target_id = None
+
+            # Uyarı bölgesi - yavaşla ve merkeze yönel
+            elif dist_from_center > SAHA_YARICAPI * 0.90:  # %90 sınırda
+                center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
+                # Mevcut komutu değiştir - merkeze yönelme ekle
+                if cmd and "yaw" in cmd:
+                    # Hedef yaw ile merkez yaw'ını karıştır (merkeze öncelik ver)
+                    target_yaw = cmd["yaw"]
+                    blend_factor = (dist_from_center - SAHA_YARICAPI * 0.90) / (SAHA_YARICAPI * 0.10)
+                    cmd["yaw"] = (target_yaw * (1 - blend_factor) + center_yaw * blend_factor) % 360
+                    cmd["speed"] = min(cmd.get("speed", 20.0), 20.0)  # Hızı sınırla
+                    mode_str = f"⚠️ SINIR YAKIN {dist_from_center:.0f}m - MERKEZE YÖN"
 
             if cmd:
                 cmd["speed"] = max(SAFETY_MIN_SPEED, min(SAFETY_MAX_SPEED, cmd.get("speed", SAFETY_MIN_SPEED)))
@@ -463,9 +494,21 @@ def run_receiver_node():
 
             dist_center = math.hypot(est_x, est_y)
             marker = "DIS" if dist_center > SAHA_YARICAPI else "IC"
+
+            # Rakip konum bilgisi
+            target_pos_str = ""
+            if target:
+                tx = target.get("x", 0.0)
+                ty = target.get("y", 0.0)
+                tz = target.get("z", 0.0)
+                target_pos_str = f" Tgt:[{tx:.0f},{ty:.0f},{tz:.0f}]"
+
+            # Hız vektörü bilgisi
+            vel_str = f"V:[{vx:.1f},{vy:.1f},{vz:.1f}]"
+
             print(
-                f"[IHA-{vehicle_cfg.vehicle_id}] {marker} Me:[{est_x:.0f},{est_y:.0f}] Dist:{dist_center:.0f}m "
-                f"Spd:{my_speed:.1f} | Tgt:{t_id} Dst:{t_dist:.0f}m | {mode_str} | {telemetry_status}",
+                f"[IHA-{vehicle_cfg.vehicle_id}] {marker} Me:[{est_x:.0f},{est_y:.0f},{est_z:.0f}] {vel_str} "
+                f"Spd:{my_speed:.1f} | Tgt:{t_id}{target_pos_str} Dst:{t_dist:.0f}m | {mode_str}",
                 end="\r",
             )
 

@@ -97,6 +97,7 @@ def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     z_gps = x[0:3]
     q = x[3:7]
     b_a = x[13:16]
+    v_enu = x[7:10]  # 3D hız vektörü
 
     R_BODY_TO_ENU = q_to_rot_matrix(q)
     R_ENU_TO_BODY = R_BODY_TO_ENU.T
@@ -110,10 +111,8 @@ def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     # Manyetometre tahmini
     z_mag = R_ENU_TO_BODY @ m_ref
 
-    # Ground speed bykl
-    speed_mag = np.linalg.norm(x[7:10])
-
-    return np.concatenate((z_gps, z_acc, z_mag, [speed_mag]))
+    # 3D hız vektörü (vx, vy, vz)
+    return np.concatenate((z_gps, z_acc, z_mag, v_enu))
 
 
 # ==============================================================================
@@ -126,7 +125,7 @@ class KF3D_UKF:
         self.x = np.zeros((16, 1))
 
         self.L_err = 15
-        self.M = 10
+        self.M = 12  # pos(3) + acc(3) + mag(3) + vel(3)
 
         self.P = np.eye(self.L_err) * 10.0
         self.initialized = False
@@ -267,9 +266,9 @@ class KF3D_UKF:
         x_new = (X_pred @ self.Wm).reshape(16,1)
         x_new[3:7,0] = q_average(X_pred, self.Wm)
 
-        #  PATCH 3: Hz Limitleme (Aynen korundu)
+        #  PATCH 3: Hz Limitleme - Gerçekçi limitler
         speed_mag = np.linalg.norm(x_new[7:10])
-        MAX_SPEED = 80.0
+        MAX_SPEED = 35.0  # Gerçekçi İHA maksimum hızı (m/s)
         if speed_mag > MAX_SPEED:
             x_new[7:10] *= (MAX_SPEED / speed_mag)
 
@@ -320,16 +319,18 @@ class KF3D_UKF:
 
         hdop = max(1.0, hdop_simulated)
         R_mat = np.diag([
-            (self.cfg.r_gps_h*hdop)**2,
-            (self.cfg.r_gps_h*hdop)**2,
-            (self.cfg.r_gps_v*hdop)**2,
-            self.cfg.r_acc**2,
-            self.cfg.r_acc**2,
-            self.cfg.r_acc**2,
-            self.cfg.r_mag**2,
-            self.cfg.r_mag**2,
-            self.cfg.r_mag**2,
-            (self.cfg.r_speed)**2
+            (self.cfg.r_gps_h*hdop)**2,      # px
+            (self.cfg.r_gps_h*hdop)**2,      # py
+            (self.cfg.r_gps_v*hdop)**2,      # pz
+            self.cfg.r_acc**2,                # ax
+            self.cfg.r_acc**2,                # ay
+            self.cfg.r_acc**2,                # az
+            self.cfg.r_mag**2,                # mx
+            self.cfg.r_mag**2,                # my
+            self.cfg.r_mag**2,                # mz
+            (self.cfg.r_speed)**2,            # vx
+            (self.cfg.r_speed)**2,            # vy
+            (self.cfg.r_speed * 2.5)**2       # vz (daha yüksek belirsizlik - altitude türevinden geldiği için)
         ])
 
         S = R_mat.copy()
@@ -392,7 +393,7 @@ class KF3D_UKF:
 
         # Hz limiti (lm gncellemesinden sonra da uygula)
         speed_mag = np.linalg.norm(self.x[7:10])
-        MAX_SPEED = 80.0
+        MAX_SPEED = 35.0  # Gerçekçi İHA maksimum hızı
         if speed_mag > MAX_SPEED:
             self.x[7:10] *= (MAX_SPEED / speed_mag)
 
