@@ -89,9 +89,10 @@ def fx(x, dt, u, g_enu=np.array([0, 0, -9.81])):
 # ==============================================================================
 # 2. LM MODEL (HX) - (HIZ BYKL EKLEND)
 # ==============================================================================
-def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
+def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0]), a_enu_est=np.zeros(3)):
     """
     lm fonksiyonu.
+    a_enu_est: Tahmin edilen ENU frame ivmesi (fx'ten geliyor)
     """
 
     z_gps = x[0:3]
@@ -102,8 +103,8 @@ def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     R_BODY_TO_ENU = q_to_rot_matrix(q)
     R_ENU_TO_BODY = R_BODY_TO_ENU.T
 
-    # Sabit hz varsaym (a_real = 0)
-    a_real = np.zeros(3)
+    # Gerçek ivme tahmini (artık sıfır değil!)
+    a_real = a_enu_est
 
     # Yeni ivme modeli
     z_acc = R_ENU_TO_BODY @ (a_real - g_enu) + b_a
@@ -112,7 +113,11 @@ def hx(x, g_enu=np.array([0, 0, -9.81]), m_ref=np.array([20.0, 0.0, 45.0])):
     z_mag = R_ENU_TO_BODY @ m_ref
 
     # 3D hız vektörü (vx, vy, vz)
-    return np.concatenate((z_gps, z_acc, z_mag, v_enu))
+    # Airspeed tahmini (body frame'deki forward hız büyüklüğü)
+    v_body = R_ENU_TO_BODY @ v_enu
+    airspeed = math.sqrt(v_body[0]**2 + v_body[1]**2 + v_body[2]**2)
+
+    return np.concatenate((z_gps, z_acc, z_mag, v_enu, [airspeed]))
 
 
 # ==============================================================================
@@ -125,10 +130,13 @@ class KF3D_UKF:
         self.x = np.zeros((16, 1))
 
         self.L_err = 15
-        self.M = 12  # pos(3) + acc(3) + mag(3) + vel(3)
+        self.M = 13  # pos(3) + acc(3) + mag(3) + vel(3) + airspeed(1)
 
         self.P = np.eye(self.L_err) * 10.0
         self.initialized = False
+
+        # Son tahmin edilen ENU frame ivmesi (hx için)
+        self.last_accel_enu = np.zeros(3)
 
         self.alpha = 3e-3
         self.beta = 2.0
@@ -295,6 +303,14 @@ class KF3D_UKF:
         self.x_pred = self.x.copy()
         self.P_pred = self.P.copy()
 
+        # İvmeyi IMU ölçümünden hesapla (hx için)
+        a_body = u[0:3]
+        b_a = self.x[13:16, 0]
+        a_body_corrected = a_body - b_a
+        q = self.x[3:7, 0]
+        R_body_to_enu = q_to_rot_matrix(q)
+        self.last_accel_enu = R_body_to_enu @ a_body_corrected - np.array([0, 0, -9.81])
+
 
     # ----------------------------------------------------
     def update(self, z_full, dt, hdop_simulated):
@@ -312,7 +328,7 @@ class KF3D_UKF:
 
         Z_sigma = np.zeros((self.M, X_sigma.shape[1]))
         for i in range(X_sigma.shape[1]):
-            Z_sigma[:,i] = hx(X_sigma[:,i])
+            Z_sigma[:,i] = hx(X_sigma[:,i], a_enu_est=self.last_accel_enu)
 
         z_hat = (Z_sigma @ self.Wm).reshape(self.M,1)
         Z_diff = Z_sigma - z_hat
@@ -328,9 +344,10 @@ class KF3D_UKF:
             self.cfg.r_mag**2,                # mx
             self.cfg.r_mag**2,                # my
             self.cfg.r_mag**2,                # mz
-            (self.cfg.r_speed)**2,            # vx
-            (self.cfg.r_speed)**2,            # vy
-            (self.cfg.r_speed * 2.5)**2       # vz (daha yüksek belirsizlik - altitude türevinden geldiği için)
+            (self.cfg.r_speed)**2,            # vx (GPS hızından)
+            (self.cfg.r_speed)**2,            # vy (GPS hızından)
+            (self.cfg.r_speed * 2.0)**2,      # vz (altitude türevinden - biraz daha gürültülü)
+            0.3**2                            # airspeed (pitot tube gürültüsü ~0.3 m/s)
         ])
 
         S = R_mat.copy()

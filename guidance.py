@@ -43,10 +43,10 @@ def _normalize_deg(angle: float) -> float:
 class GpsPursuitController:
     def __init__(
         self,
-        min_speed_ms: float = 12.0,
-        max_speed_ms: float = 65.0,
-        full_brake_speed_ms: float = 6.0,
-        max_escape_speed_ms: float = 55.0,
+        min_speed_ms: float = 15.0,  # Sabit kanat stall koruması (Teknofest)
+        max_speed_ms: float = 30.0,  # Sabit kanat max hız (Teknofest)
+        full_brake_speed_ms: float = 15.0,  # Sabit kanat minimum (stall önleme)
+        max_escape_speed_ms: float = 28.0,  # Acil durum max (Teknofest)
         brake_distance_m: float = 30.0,
         hard_brake_distance_m: float = 12.0,
         cruise_distance_m: float = 120.0,

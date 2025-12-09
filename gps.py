@@ -32,11 +32,11 @@ TELEMETRY_TIMEOUT_S = 2.0  # veri yoksa fallback
 LOCK_THRESHOLD_M = 30.0  # Kamera menzili - 30m
 LOCK_ANGLE_DEG = 15.0     # Kamera için yaw hizalanma toleransı - 15 derece
 LOCK_ALTITUDE_DIFF_M = 8.0  # İrtifa farkı toleransı - 8m
-LOCK_DURATION = 5.0       # Kilit süresi
-SAFETY_MIN_SPEED = 15.0
-SAFETY_MAX_SPEED = 60.0
-SAFETY_MIN_ALT = 20.0
-SAFETY_MAX_ALT = 150.0
+LOCK_DURATION = 5.0       # Kilit süresi (Teknofest kuralı)
+SAFETY_MIN_SPEED = 15.0   # Sabit kanat stall hızı
+SAFETY_MAX_SPEED = 30.0   # Sabit kanat için güvenli maksimum (Teknofest)
+SAFETY_MIN_ALT = 20.0     # Minimum güvenli irtifa
+SAFETY_MAX_ALT = 150.0    # Maksimum irtifa (Teknofest sınırı)
 
 
 def run_receiver_node():
@@ -264,7 +264,14 @@ def run_receiver_node():
                 last_gps_alt = current_alt
                 last_gps_time = t_now
 
-                # UKF ölçüm vektörü: [pos(3), acc_body(3), mag_dummy(3), vel(3)]
+                # Airspeed sensor ölçümü (varsa)
+                # ArduPilot VFR_HUD mesajındaki airspeed değeri
+                airspeed_measured = float(tm["gps"].get("airspeed", 0.0))
+                if airspeed_measured == 0.0:
+                    # Eğer airspeed sensörü yoksa, ground speed'i kullan (yedek)
+                    airspeed_measured = gps_speed
+
+                # UKF ölçüm vektörü: [pos(3), acc_body(3), mag_dummy(3), vel(3), airspeed(1)]
                 z_full = np.array(
                     [
                         raw_pos[0],
@@ -279,6 +286,7 @@ def run_receiver_node():
                         gps_vx,
                         gps_vy,
                         vz_gps,
+                        airspeed_measured,
                     ]
                 )
 
@@ -456,26 +464,66 @@ def run_receiver_node():
                     cmd["alt"] = max(cmd.get("alt", 50.0), 50.0)
                     mode_str = "KILIT | HEDEF KAYIP"
 
-            # GÜÇLÜ Saha dışı kontrol - ÖNCELİK EN YÜKSEK!
-            outside_duration = 0.0
+            # GÜÇLÜ Saha dışı kontrol - ÖNCELİK EN YÜKSEK! (Teknofest 30s kuralı)
             dist_from_center = math.hypot(est_x, est_y)
 
-            # Kritik saha dışı - ACİL DÖNÜŞ
+            # Kritik saha dışı - ACİL DÖNÜŞ + 30s SAYACI
             if dist_from_center > SAHA_YARICAPI:
-                center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
-                cmd = {
-                    "type": "control",
-                    "yaw": center_yaw,
-                    "speed": 30.0,  # Daha hızlı geri dön
-                    "alt": 80.0,    # Daha yüksek irtifa (engel önleme)
-                    "action": "rtl",
-                }
-                mode_str = f"🚨 SAHA DIŞI {dist_from_center:.0f}m - ACİL RTL"
+                # 30 saniye sayacını başlat
+                if outside_timer_start is None:
+                    outside_timer_start = time.time()
+                    print(f"\n⚠️ SAHA DIŞINA ÇIKTI! 30 saniye içinde geri dönülmeli!")
+
+                outside_duration = time.time() - outside_timer_start
+                remaining_time = SAHA_DISI_TIMEOUT_S - outside_duration
+
+                # 30 saniye kontrolü
+                if outside_duration > SAHA_DISI_TIMEOUT_S:
+                    mode_str = f"🚫 DİSKALİFİYE! {dist_from_center:.0f}m - 30s AŞILDI"
+                    print(f"\n🚫 DİSKALİFİYE: {outside_duration:.1f}s saha dışında kaldı!")
+                    # Acil iniş komutu (yarış bitti)
+                    cmd = {
+                        "type": "control",
+                        "yaw": 0.0,
+                        "speed": 15.0,
+                        "alt": 20.0,
+                        "action": "land",  # İniş yap
+                    }
+                elif outside_duration > SAHA_DISI_WARNING_S:
+                    # 15 saniye uyarısı
+                    center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
+                    cmd = {
+                        "type": "control",
+                        "yaw": center_yaw,
+                        "speed": 30.0,  # Maksimum hızla dön
+                        "alt": 80.0,
+                        "action": "rtl",
+                    }
+                    mode_str = f"🚨 KRİTİK! {dist_from_center:.0f}m - {remaining_time:.1f}s KALDI!"
+                    if int(outside_duration) % 2 == 0:  # Her 2 saniyede uyar
+                        print(f"⏰ UYARI: {remaining_time:.1f}s içinde saha içine dönülmeli!")
+                else:
+                    # İlk 15 saniye - normal RTL
+                    center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
+                    cmd = {
+                        "type": "control",
+                        "yaw": center_yaw,
+                        "speed": 25.0,
+                        "alt": 80.0,
+                        "action": "rtl",
+                    }
+                    mode_str = f"🚨 SAHA DIŞI {dist_from_center:.0f}m - RTL ({remaining_time:.1f}s)"
+
                 lock_timer_start = None
                 locking_target_id = None
 
             # Uyarı bölgesi - yavaşla ve merkeze yönel
-            elif dist_from_center > SAHA_YARICAPI * 0.90:  # %90 sınırda
+            elif dist_from_center > SAHA_YARICAPI * 0.90:  # %90 sınırda (450m)
+                # Saha içine geri döndü - sayacı sıfırla
+                if outside_timer_start is not None:
+                    print(f"\n✅ SAHA İÇİNE GERİ DÖNÜLDÜ! ({outside_duration:.1f}s saha dışında kaldı)")
+                    outside_timer_start = None
+
                 center_yaw = math.degrees(math.atan2(-est_y, -est_x)) % 360
                 # Mevcut komutu değiştir - merkeze yönelme ekle
                 if cmd and "yaw" in cmd:
@@ -485,6 +533,11 @@ def run_receiver_node():
                     cmd["yaw"] = (target_yaw * (1 - blend_factor) + center_yaw * blend_factor) % 360
                     cmd["speed"] = min(cmd.get("speed", 20.0), 20.0)  # Hızı sınırla
                     mode_str = f"⚠️ SINIR YAKIN {dist_from_center:.0f}m - MERKEZE YÖN"
+            else:
+                # Güvenli bölgede - sayacı sıfırla
+                if outside_timer_start is not None:
+                    print(f"\n✅ SAHA İÇİNE GERİ DÖNÜLDÜ! ({time.time() - outside_timer_start:.1f}s saha dışında kaldı)")
+                    outside_timer_start = None
 
             if cmd:
                 cmd["speed"] = max(SAFETY_MIN_SPEED, min(SAFETY_MAX_SPEED, cmd.get("speed", SAFETY_MIN_SPEED)))

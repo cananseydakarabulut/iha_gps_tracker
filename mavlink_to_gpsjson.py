@@ -56,6 +56,9 @@ def _build_gps(gpos, vfr) -> Optional[dict]:
     # Heading (yönelim) hesapla
     heading = gpos.hdg / 100.0 if hasattr(gpos, "hdg") and gpos.hdg != 65535 else 0.0
 
+    # Airspeed (hava hızı) - pitot tube sensöründen
+    airspeed = getattr(vfr, "airspeed", 0.0) if vfr else 0.0
+
     return {
         "is_valid": True,
         "lat": lat,
@@ -65,6 +68,7 @@ def _build_gps(gpos, vfr) -> Optional[dict]:
         "ground_speed": speed_ms,
         "heading": heading,
         "hdop": getattr(gpos, "eph", 1.0) if hasattr(gpos, "eph") else 1.0,
+        "airspeed": airspeed,  # Hava hızı (m/s)
     }
 
 
