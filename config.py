@@ -41,9 +41,10 @@ class KFConfig:
 @dataclass
 class SimCfg:
     # Başlangıç pozisyonu (DMS formatı, destekleniyor)
-    lat0: str = "39°55'14.8\"N"
-    lon0: str = "32°51'14.8\"E"
-    h0: float = 900.0
+    # SITL default location: Canberra, Australia
+    lat0: str = "-35°21'47.6\"S"
+    lon0: str = "149°09'54.9\"E"
+    h0: float = 584.0
 
     # Simülasyon parametreleri
     T: float = 300.0           # toplam sim süresi (s)

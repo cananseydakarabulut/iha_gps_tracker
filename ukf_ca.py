@@ -209,3 +209,4 @@ class UKF_CA_Model:
     def get_speed(self):
         vx, vy, vz = self.x[3:6].flatten()
         return math.sqrt(vx * vx + vy * vy + vz * vz)
+#yedek 
