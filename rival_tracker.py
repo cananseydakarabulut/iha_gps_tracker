@@ -375,6 +375,33 @@ class RivalTracker:
         self.ignore_rival(tid)
         return True
 
+    def get_all_rivals(self):
+        """
+        Tüm aktif rakiplerin pozisyonlarını döndürür (çarpışma önleme için).
+        Returns: dict {team_id: {"x": px, "y": py, "z": pz, "speed": v}}
+        """
+        now = time.time()
+        all_rivals = {}
+
+        for tid, ukf in self.filters.items():
+            if tid in self.ignored:
+                continue
+            if now - self.last_update_time.get(tid, 0) > 5.0:  # Eski veri
+                continue
+
+            s = ukf.get_state()
+            px, py, pz = s[0], s[1], s[2]
+            v = s[3]
+
+            all_rivals[tid] = {
+                "x": px,
+                "y": py,
+                "z": pz,
+                "speed": v,
+            }
+
+        return all_rivals
+
     def get_closest_rival(self, my_x, my_y, my_z, my_heading_deg):
         now = time.time()
         best = None

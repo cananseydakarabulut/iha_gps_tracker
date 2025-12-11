@@ -85,6 +85,8 @@ def main():
     ap.add_argument("--out-ip", default="127.0.0.1", help="gps.py dinleyen IP (varsaylan 127.0.0.1)")
     ap.add_argument("--out-port", type=int, default=None, help="gps.py dinleyen port (varsayilan: 5799 + VEHICLE_ID - 1)")
     ap.add_argument("--vehicle-id", type=int, default=None, help="IHA ID (VEHICLE_ID ortam değişkeninden okunur)")
+    ap.add_argument("--peer-master", default=None, help="Rakip IHA MAVLink bağlantısı (ornek: tcp:127.0.0.1:5770)")
+    ap.add_argument("--peer-team-id", type=int, default=None, help="Rakip takım numarası")
     args = ap.parse_args()
 
     # Vehicle ID belirle (argüman > ortam değişkeni > varsayılan)
@@ -98,6 +100,19 @@ def main():
 
     m = _connect(args.master)
 
+    # Rakip bağlantısı (opsiyonel)
+    peer = None
+    peer_team_id = args.peer_team_id
+    if args.peer_master:
+        print(f"[bridge] Rakip bağlantısı kuruluyor: {args.peer_master}")
+        try:
+            peer = mavutil.mavlink_connection(args.peer_master)
+            peer.wait_heartbeat(timeout=5)
+            print(f"[bridge] Rakip heartbeat ok (Team ID: {peer_team_id})")
+        except Exception as e:
+            print(f"[bridge] UYARI: Rakip bağlantısı başarısız: {e}")
+            peer = None
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     print(f"[bridge] Forwarding to {args.out_ip}:{args.out_port}")
 
@@ -105,6 +120,10 @@ def main():
     last_scaled_imu = None
     last_gpos = None
     last_vfr = None
+
+    # Rakip telemetrisi
+    peer_last_gpos = None
+    peer_last_vfr = None
 
     while True:
         msg = _recv_matching(m, ["GLOBAL_POSITION_INT", "VFR_HUD", "HIGHRES_IMU", "SCALED_IMU2", "SCALED_IMU", "ATTITUDE"])
@@ -123,17 +142,43 @@ def main():
         elif mtype in ("SCALED_IMU", "SCALED_IMU2"):
             last_scaled_imu = msg
 
+        # Rakip telemetrisini oku (non-blocking)
+        if peer:
+            peer_msg = _recv_matching(peer, ["GLOBAL_POSITION_INT", "VFR_HUD"])
+            if peer_msg:
+                peer_mtype = peer_msg.get_type()
+                if peer_mtype == "GLOBAL_POSITION_INT":
+                    peer_last_gpos = peer_msg
+                elif peer_mtype == "VFR_HUD":
+                    peer_last_vfr = peer_msg
+
         gps_block = _build_gps(last_gpos, last_vfr)
         imu_block = _build_imu(last_imu, last_scaled_imu)
 
         if gps_block is None:
             continue
 
+        # Rakip telemetrisini network_data'ya ekle
+        network_data = []
+        if peer and peer_last_gpos and peer_team_id is not None:
+            peer_gps = _build_gps(peer_last_gpos, peer_last_vfr)
+            if peer_gps:
+                network_data.append({
+                    "takim_numarasi": peer_team_id,
+                    "iha_enlem": peer_gps["lat"],
+                    "iha_boylam": peer_gps["lon"],
+                    "iha_irtifa": peer_gps["alt"],
+                    "iha_hiz": peer_gps["speed_ms"],
+                    "iha_yonelme": peer_gps["heading"],
+                    "iha_dikilme": 0.0,  # pitch bilgisi yok
+                    "iha_yatis": 0.0,    # roll bilgisi yok
+                })
+
         tm = {
             "time_s": now,
             "gps": gps_block,
             "imu": imu_block,
-            "network_data": [],  # rival_tracker icin bos bir liste
+            "network_data": network_data,
         }
 
         payload = json.dumps(tm).encode("utf-8")

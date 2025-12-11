@@ -38,6 +38,10 @@ SAFETY_MAX_SPEED = 30.0   # Sabit kanat için güvenli maksimum (Teknofest)
 SAFETY_MIN_ALT = 20.0     # Minimum güvenli irtifa
 SAFETY_MAX_ALT = 150.0    # Maksimum irtifa (Teknofest sınırı)
 
+# Çarpışma önleme (çoklu araç senaryosu için)
+COLLISION_AVOIDANCE_DISTANCE = 15.0  # Kritik mesafe - acil kaçış (metre)
+COLLISION_CHECK_RADIUS = 50.0        # Tüm rakipleri kontrol et (metre)
+
 
 def run_receiver_node():
     # Konfigürasyon yükle
@@ -80,6 +84,7 @@ def run_receiver_node():
     my_speed = 0.0
     lock_timer_start = None
     locking_target_id = None
+    locked_target_id = None  # Kilitlenen hedef - değiştirme!
     outside_timer_start = None
     last_valid_xy = None
 
@@ -313,7 +318,26 @@ def run_receiver_node():
             if rival_tracker and "network_data" in tm:
                 rival_tracker.update_from_server_response(tm["network_data"])
 
-            target = rival_tracker.get_closest_rival(est_x, est_y, est_z, yaw_d) if rival_tracker else None
+            # HEDEF SEÇİMİ: Kilitli hedef varsa onu kullan, yoksa en yakını seç
+            if locked_target_id and rival_tracker:
+                # Kilitlenmiş hedef var - sadece onu takip et!
+                all_rivals = rival_tracker.get_all_rivals()
+                if locked_target_id in all_rivals:
+                    rival_data = all_rivals[locked_target_id]
+                    target = {
+                        "takim_numarasi": locked_target_id,
+                        "x": rival_data["x"],
+                        "y": rival_data["y"],
+                        "z": rival_data["z"],
+                        "v": rival_data["speed"],
+                    }
+                else:
+                    # Kilitli hedef kayboldu
+                    locked_target_id = None
+                    target = rival_tracker.get_closest_rival(est_x, est_y, est_z, yaw_d)
+            else:
+                # Normal hedef seçimi
+                target = rival_tracker.get_closest_rival(est_x, est_y, est_z, yaw_d) if rival_tracker else None
 
             # Saha disina cikmis hedefi takip etme
             if target:
@@ -334,7 +358,56 @@ def run_receiver_node():
             soft_geofence = 0.7 * SAHA_YARICAPI
             hard_geofence = 0.85 * SAHA_YARICAPI
 
-            if target and dist_center_precheck < soft_geofence:
+            # ÖNCELİKLİ ÇARPIŞMA ÖNLEME: Tüm rakipleri kontrol et (sadece hedef değil!)
+            collision_threat = None
+            min_threat_dist = float('inf')
+
+            if rival_tracker:
+                # Tüm rakipleri al ve mesafe kontrol et
+                all_rivals = rival_tracker.get_all_rivals()
+                for rival_id, rival_data in all_rivals.items():
+                    rx = rival_data.get("x", 0.0)
+                    ry = rival_data.get("y", 0.0)
+                    rz = rival_data.get("z", est_z)
+
+                    dist_to_rival = math.sqrt(
+                        (rx - est_x)**2 +
+                        (ry - est_y)**2 +
+                        (rz - est_z)**2
+                    )
+
+                    # Kritik mesafede mi?
+                    if dist_to_rival < COLLISION_AVOIDANCE_DISTANCE and dist_to_rival < min_threat_dist:
+                        min_threat_dist = dist_to_rival
+                        collision_threat = {"x": rx, "y": ry, "z": rz, "id": rival_id, "dist": dist_to_rival}
+
+            # ACIL KAÇIŞ: Herhangi bir rakip çok yakınsa
+            if collision_threat:
+                # En yakın tehlikeden kaç: ters yön + yüksel
+                threat_x = collision_threat["x"]
+                threat_y = collision_threat["y"]
+                escape_yaw = (math.degrees(math.atan2(threat_y - est_y, threat_x - est_x)) + 180.0) % 360.0
+                escape_alt = min(est_z + 20.0, SAFETY_MAX_ALT)  # +20m yüksel
+
+                cmd = {
+                    "type": "control",
+                    "yaw": escape_yaw,
+                    "speed": SAFETY_MAX_SPEED,
+                    "alt": escape_alt,
+                }
+                mode_str = f"⚠ ACIL KAÇIŞ - Araç #{collision_threat['id']} ({collision_threat['dist']:.1f}m)"
+                t_dist = collision_threat["dist"]
+
+                # Kamera kilidi devam ediyorsa, hedefi koru!
+                if lock_timer_start is not None and locking_target_id is not None:
+                    locked_target_id = locking_target_id  # Kilitlenen hedefi sakla
+                    lock_timer_start = None  # Timer'ı sıfırla (sonra devam edecek)
+                    print(f"🚨 ÇARPIŞMA! Araç #{collision_threat['id']} ({collision_threat['dist']:.1f}m) - Hedef #{locked_target_id} KİLİTLİ KALIYOR, KAÇILIYOR!")
+                else:
+                    print(f"🚨 ÇARPIŞMA TEHLİKESİ! Araç #{collision_threat['id']} - {collision_threat['dist']:.1f}m - KAÇILIYOR!")
+
+            # NORMAL TAKİP: Çarpışma riski yoksa
+            elif target and dist_center_precheck < soft_geofence:
                 g_cmd = guidance.compute_command(
                     (est_x, est_y, est_z),
                     my_speed,
@@ -367,7 +440,8 @@ def run_receiver_node():
                     if lock_timer_start is None or locking_target_id != t_id:
                         lock_timer_start = time.time()
                         locking_target_id = t_id
-                        print(f"KAMERA KILIT başladı: Hedef={t_id} | Mesafe={t_dist:.1f}m | Yaw={yaw_err:.1f}° | Alt={altitude_diff:.1f}m")
+                        locked_target_id = t_id  # Hedefi kilitle - başka hedef arama!
+                        print(f"🎯 KAMERA KILIT başladı: Hedef={t_id} (KİLİTLİ) | Mesafe={t_dist:.1f}m | Yaw={yaw_err:.1f}° | Alt={altitude_diff:.1f}m")
 
                     elapsed = time.time() - lock_timer_start
                     if elapsed >= LOCK_DURATION:
@@ -377,15 +451,17 @@ def run_receiver_node():
                             mode_str = "KAMERA KILIT TAMAMLANDI"
                             lock_timer_start = None
                             locking_target_id = None
-                            print(f"✓ HEDEF {t_id} KİLİTLENDİ!")
+                            locked_target_id = None  # Hedef vuruldu, artık başka hedef ara
+                            print(f"✓ HEDEF {t_id} KİLİTLENDİ VE VURULDU!")
                     else:
                         mode_str += f" | KILIT {LOCK_DURATION - elapsed:.1f}s | Y:{yaw_err:.0f}° A:{altitude_diff:.0f}m"
                 else:
-                    # Kilit koşulları kayboldu
-                    if lock_timer_start is not None:
+                    # Kilit koşulları kayboldu (ama locked_target varsa geri dönmeye çalışacak)
+                    if lock_timer_start is not None and locked_target_id is None:
+                        # Henüz kilitlenmemişse iptal et
                         print(f"Kilit kaybedildi: Mesafe={t_dist:.1f}m Yaw={yaw_err:.1f}° Alt={altitude_diff:.1f}m")
-                    lock_timer_start = None
-                    locking_target_id = None
+                        lock_timer_start = None
+                        locking_target_id = None
 
                 cmd = {
                     "type": "control",
