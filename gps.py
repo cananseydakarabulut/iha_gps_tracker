@@ -193,7 +193,9 @@ def run_receiver_node():
                         ref_lon = tm["gps"]["lon"]
                         ref_h = tm["gps"]["alt"]
                         rival_tracker = RivalTracker(ref_lat, ref_lon, ref_h, my_team_id=vehicle_cfg.team_id)
-                        print(f"[IHA-{vehicle_cfg.vehicle_id}] Referans ayarlandi: {ref_lat:.6f}, {ref_lon:.6f}")
+                        print(f"[IHA-{vehicle_cfg.vehicle_id}] Referans ayarlandi: {ref_lat:.6f}, {ref_lon:.6f}, h={ref_h:.1f}m")
+                        if abs(ref_h) > 5000:
+                            print(f"⚠️ UYARI: Referans irtifa çok yüksek! h_ref={ref_h}m")
 
                     pos0 = llh_to_enu(
                         tm["gps"]["lat"],

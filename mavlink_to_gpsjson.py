@@ -59,7 +59,7 @@ def _build_gps(gpos, vfr) -> Optional[dict]:
     # Airspeed (hava hızı) - pitot tube sensöründen
     airspeed = getattr(vfr, "airspeed", 0.0) if vfr else 0.0
 
-    return {
+    gps_data = {
         "is_valid": True,
         "lat": lat,
         "lon": lon,
@@ -70,6 +70,10 @@ def _build_gps(gpos, vfr) -> Optional[dict]:
         "hdop": getattr(gpos, "eph", 1.0) if hasattr(gpos, "eph") else 1.0,
         "airspeed": airspeed,  # Hava hızı (m/s)
     }
+    # Debug: İrtifa kontrolü
+    if abs(alt) > 5000:
+        print(f"⚠️ UYARI: Anormal GPS irtifa! alt={alt}m (raw={gpos.alt}mm)")
+    return gps_data
 
 
 def main():

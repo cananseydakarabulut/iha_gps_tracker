@@ -52,10 +52,10 @@ class SimCfg:
     fs_gps: float = 1.0        # GPS frekansı (Hz)
     v0: float = 20.0           # başlangıç hızı
 
-    # Hedef koordinatları
-    target_lat: str = "39°56'00.0\"N"
-    target_lon: str = "32°52'12.0\"E"
-    target_h: float = 950.0
+    # Hedef koordinatları (SITL test için Avustralya'da)
+    target_lat: str = "-35°21'50.0\"S"
+    target_lon: str = "149°10'00.0\"E"
+    target_h: float = 600.0
 
 
 __all__ = ["VehicleConfig", "KFConfig", "SimCfg"]
