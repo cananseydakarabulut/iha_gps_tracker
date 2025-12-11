@@ -375,9 +375,15 @@ class RivalTracker:
         self.ignore_rival(tid)
         return True
 
-    def get_all_rivals(self):
+    def get_all_rivals(self, min_speed_threshold=2.0, max_stationary_distance=15.0):
         """
         Tüm aktif rakiplerin pozisyonlarını döndürür (çarpışma önleme için).
+        Statik rakipleri (hareket etmeyen) filtreler.
+
+        Args:
+            min_speed_threshold: Minimum hız eşiği (m/s) - altındaki araçlar ignore edilir
+            max_stationary_distance: Başlangıç noktasına bu mesafeden yakınsa ve yavaşsa ignore et
+
         Returns: dict {team_id: {"x": px, "y": py, "z": pz, "speed": v}}
         """
         now = time.time()
@@ -392,6 +398,12 @@ class RivalTracker:
             s = ukf.get_state()
             px, py, pz = s[0], s[1], s[2]
             v = s[3]
+
+            # Statik rakip filtresi: Eğer çok yavaş VE başlangıç noktasına çok yakınsa ignore et
+            dist_from_origin = math.sqrt(px**2 + py**2 + pz**2)
+            if v < min_speed_threshold and dist_from_origin < max_stationary_distance:
+                # Hareket etmeyen araç (yer istasyonunda duruyor) - ignore et
+                continue
 
             all_rivals[tid] = {
                 "x": px,

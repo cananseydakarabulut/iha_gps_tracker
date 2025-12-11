@@ -59,12 +59,15 @@ def run_receiver_node():
     print(f"Dinleme Portu: {listen_port} | Kontrol Portu: {control_port}")
     print("=" * 60)
 
-    ref_lat = None
-    ref_lon = None
-    ref_h = None
+    # ✅ FIX: Config.py'den sabit referans koordinatları al (GPS'ten değil!)
+    from geo_utils import parse_if_dms
+    ref_lat = parse_if_dms(sim_cfg.lat0)
+    ref_lon = parse_if_dms(sim_cfg.lon0)
+    ref_h = sim_cfg.h0
+    print(f"[CONFIG] Sabit referans: {ref_lat:.6f}, {ref_lon:.6f}, h={ref_h:.1f}m")
 
     kf = KF3D_UKF(kf_cfg)
-    rival_tracker = None
+    rival_tracker = RivalTracker(ref_lat, ref_lon, ref_h, my_team_id=vehicle_cfg.team_id)
     guidance = GpsPursuitController()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -151,23 +154,19 @@ def run_receiver_node():
                 if time_since_last > TELEMETRY_TIMEOUT_S:
                     telemetry_timeout_count += 1
                     telemetry_status = "TIMEOUT"
-                    if telemetry_timeout_count % 100 == 1:
-                        print(f"Telemetri yok ({time_since_last:.1f}s)")
-                    if last_valid_tm:
-                        tm = last_valid_tm
-                        telemetry_status = "FALLBACK_LAST"
-                    else:
-                        if is_init:
-                            cmd = {
-                                "type": "control",
-                                "yaw": fallback_state["yaw"],
-                                "speed": 5.0,
-                                "alt": 50.0,
-                                "action": "loiter",
-                            }
-                            control_sock.sendto(json.dumps(cmd).encode(), (LISTEN_IP, control_port))
-                        time.sleep(0.05)
-                        continue
+                    if telemetry_timeout_count % 20 == 1:
+                        print(f"Telemetri yok ({time_since_last:.1f}s), emniyet loiter")
+                    # Veri gelmiyorsa hesaplama yapma, sadece güvenli komut gönder
+                    safe_cmd = {
+                        "type": "control",
+                        "yaw": 0.0,
+                        "speed": max(10.0, fallback_state["speed"]),
+                        "alt": max(SAFETY_MIN_ALT, fallback_state["z"]),
+                        "action": "loiter",
+                    }
+                    control_sock.sendto(json.dumps(safe_cmd).encode(), (LISTEN_IP, control_port))
+                    time.sleep(0.1)
+                    continue
                 else:
                     time.sleep(0.01)
                     continue
@@ -177,25 +176,31 @@ def run_receiver_node():
                 continue
 
             gps_valid = tm.get("gps", {}).get("is_valid", False)
+            ground_speed = float(tm.get("gps", {}).get("speed_ms", tm.get("gps", {}).get("ground_speed", 0.0)))
 
-            t_now = tm["time_s"]
+            # GPS geçerli değilse ya da yerdeyse (hız yok, hedef de yok): sadece bekle/loiter, hesaplama yapma
+            if (not gps_valid) or (ground_speed < 0.5 and (tm.get("targets") in (None, [], {}) or tm.get("target") is None)):
+                safe_cmd = {
+                    "type": "control",
+                    "yaw": 0.0,
+                    "speed": SAFETY_MIN_SPEED,
+                    "alt": max(SAFETY_MIN_ALT, fallback_state["z"]),
+                    "action": "loiter",
+                }
+                control_sock.sendto(json.dumps(safe_cmd).encode(), (LISTEN_IP, control_port))
+                time.sleep(0.05)
+                continue
+
+            # dt'yi gerçek zamanla sınırla; paket zamanı güvenilmez olabilir
+            t_now = time.time()
             if last_time is None:
                 last_time = t_now
-            dt = t_now - last_time
-            if dt <= 0:
-                dt = 0.01
+            dt = max(0.001, min(0.1, t_now - last_time))
             last_time = t_now
 
             if not is_init:
                 if tm["gps"]["is_valid"]:
-                    if ref_lat is None:
-                        ref_lat = tm["gps"]["lat"]
-                        ref_lon = tm["gps"]["lon"]
-                        ref_h = tm["gps"]["alt"]
-                        rival_tracker = RivalTracker(ref_lat, ref_lon, ref_h, my_team_id=vehicle_cfg.team_id)
-                        print(f"[IHA-{vehicle_cfg.vehicle_id}] Referans ayarlandi: {ref_lat:.6f}, {ref_lon:.6f}, h={ref_h:.1f}m")
-                        if abs(ref_h) > 5000:
-                            print(f"⚠️ UYARI: Referans irtifa çok yüksek! h_ref={ref_h}m")
+                    # ✅ Referans zaten config.py'den alındı, GPS'ten almaya gerek yok
 
                     pos0 = llh_to_enu(
                         tm["gps"]["lat"],
@@ -360,11 +365,15 @@ def run_receiver_node():
             soft_geofence = 0.7 * SAHA_YARICAPI
             hard_geofence = 0.85 * SAHA_YARICAPI
 
-            # ÖNCELİKLİ ÇARPIŞMA ÖNLEME: Tüm rakipleri kontrol et (sadece hedef değil!)
+            # ÖNCELİK 1: GEOFENCE KONTROLÜ (En yüksek öncelik - saha dışı tehlikesi)
+            # Eğer saha sınırına çok yakınsak, çarpışma önlemeyi devre dışı bırak
+            geofence_critical = dist_center_precheck > hard_geofence  # 425m+
+
+            # ÖNCELİK 2: ÇARPIŞMA ÖNLEME (Sadece geofence güvenliyse)
             collision_threat = None
             min_threat_dist = float('inf')
 
-            if rival_tracker:
+            if rival_tracker and not geofence_critical:
                 # Tüm rakipleri al ve mesafe kontrol et
                 all_rivals = rival_tracker.get_all_rivals()
                 for rival_id, rival_data in all_rivals.items():
@@ -383,8 +392,8 @@ def run_receiver_node():
                         min_threat_dist = dist_to_rival
                         collision_threat = {"x": rx, "y": ry, "z": rz, "id": rival_id, "dist": dist_to_rival}
 
-            # ACIL KAÇIŞ: Herhangi bir rakip çok yakınsa
-            if collision_threat:
+            # ACIL KAÇIŞ: Herhangi bir rakip çok yakınsa (VE geofence güvenli)
+            if collision_threat and not geofence_critical:
                 # En yakın tehlikeden kaç: ters yön + yüksel
                 threat_x = collision_threat["x"]
                 threat_y = collision_threat["y"]
