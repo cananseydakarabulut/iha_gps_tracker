@@ -129,12 +129,18 @@ def main():
     peer_last_gpos = None
     peer_last_vfr = None
 
+    msg_count = 0
     while True:
         msg = _recv_matching(m, ["GLOBAL_POSITION_INT", "VFR_HUD", "HIGHRES_IMU", "SCALED_IMU2", "SCALED_IMU", "ATTITUDE"])
         now = time.time()
 
         if msg is None:
             continue
+
+        # DEBUG: İlk 10 mesajı göster
+        msg_count += 1
+        if msg_count <= 10:
+            print(f"[DEBUG] Mesaj alındı: {msg.get_type()}")
 
         mtype = msg.get_type()
         if mtype == "GLOBAL_POSITION_INT":
