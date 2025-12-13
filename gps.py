@@ -155,17 +155,10 @@ def run_receiver_node():
                     telemetry_timeout_count += 1
                     telemetry_status = "TIMEOUT"
                     if telemetry_timeout_count % 20 == 1:
-                        print(f"Telemetri yok ({time_since_last:.1f}s), emniyet loiter")
-                    # Veri gelmiyorsa hesaplama yapma, sadece güvenli komut gönder
-                    safe_cmd = {
-                        "type": "control",
-                        "yaw": 0.0,
-                        "speed": max(10.0, fallback_state["speed"]),
-                        "alt": max(SAFETY_MIN_ALT, fallback_state["z"]),
-                        "action": "loiter",
-                    }
-                    control_sock.sendto(json.dumps(safe_cmd).encode(), (LISTEN_IP, control_port))
-                    time.sleep(0.1)
+                        print(f"⚠️ Telemetri yok ({time_since_last:.1f}s) - KOMUT GÖNDERİLMİYOR!")
+                    # Telemetri yokken KOMUT GÖNDERME - pozisyon bilinmiyor!
+                    # Uçak mevcut modunda kalacak (GUIDED/LOITER/RTL)
+                    time.sleep(0.5)
                     continue
                 else:
                     time.sleep(0.01)
@@ -178,16 +171,15 @@ def run_receiver_node():
             gps_valid = tm.get("gps", {}).get("is_valid", False)
             ground_speed = float(tm.get("gps", {}).get("speed_ms", tm.get("gps", {}).get("ground_speed", 0.0)))
 
-            # GPS geçerli değilse ya da yerdeyse (hız yok, hedef de yok): sadece bekle/loiter, hesaplama yapma
-            if (not gps_valid) or (ground_speed < 0.5 and (tm.get("targets") in (None, [], {}) or tm.get("target") is None)):
-                safe_cmd = {
-                    "type": "control",
-                    "yaw": 0.0,
-                    "speed": SAFETY_MIN_SPEED,
-                    "alt": max(SAFETY_MIN_ALT, fallback_state["z"]),
-                    "action": "loiter",
-                }
-                control_sock.sendto(json.dumps(safe_cmd).encode(), (LISTEN_IP, control_port))
+            # GPS geçerli değilse: KOMUT GÖNDERME! Pozisyon bilinmiyor.
+            if not gps_valid:
+                if telemetry_timeout_count % 20 == 1:
+                    print(f"⚠️ GPS geçersiz - KOMUT GÖNDERİLMİYOR!")
+                time.sleep(0.1)
+                continue
+
+            # Yerdeyse (hız yok, hedef de yok): bekle
+            if ground_speed < 0.5 and (tm.get("targets") in (None, [], {}) or tm.get("target") is None):
                 time.sleep(0.05)
                 continue
 
@@ -629,6 +621,12 @@ def run_receiver_node():
             if cmd:
                 cmd["speed"] = max(SAFETY_MIN_SPEED, min(SAFETY_MAX_SPEED, cmd.get("speed", SAFETY_MIN_SPEED)))
                 cmd["alt"] = max(SAFETY_MIN_ALT, min(SAFETY_MAX_ALT, cmd.get("alt", SAFETY_MIN_ALT)))
+
+            # SON KONTROL: Initialize olmadan komut gönderme!
+            if not is_init:
+                print("⚠️ UKF initialize olmamış - KOMUT GÖNDERİLMİYOR!")
+                time.sleep(0.1)
+                continue
 
             control_sock.sendto(json.dumps(cmd).encode(), (LISTEN_IP, control_port))
 
