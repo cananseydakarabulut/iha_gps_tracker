@@ -38,8 +38,3 @@ boundary_manager/
 ardupilot/
 my_python_module.py
 mock_telemetry_server.py
-
-# Simulation-only files (not used on real aircraft)
-mavlink_to_gpsjson.py
-json_to_mavlink.py
-rival_autopilot_plane.py

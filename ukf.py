@@ -364,7 +364,9 @@ class KF3D_UKF:
         y = z - z_hat
         d2 = float(y.T @ S_inv @ y)
         if d2 > self.cfg.chi2_threshold:
-            return False
+            # Aykırı ölçüm: yeniliği küçültüp yine de güncelle
+            scale = math.sqrt(self.cfg.chi2_threshold / d2)
+            y *= scale
 
         P_xz = np.zeros((self.L_err,self.M))
         for i in range(X_sigma.shape[1]):

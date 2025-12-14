@@ -11,7 +11,7 @@ from ukf import KF3D_UKF
 from geo_utils import llh_to_enu
 from rival_tracker import RivalTracker
 from guidance import GpsPursuitController, SAHA_YARICAPI
-from quaternion_utils import q_to_euler_bounded
+from quaternion_utils import angle_to_q, q_to_euler_bounded
 
 # -----------------------------
 # PORT AYARLARI (BASE - Her IHA kendi ID'sine gore offset ekler)
@@ -23,7 +23,7 @@ BASE_CONTROL_PORT = 5771  # IHA-1: 5771, IHA-2: 5772, IHA-3: 5773 ...
 BUFFER_SIZE = 8192
 
 # Gercek saha ayarlari (Teknofest)
-SAHA_YARICAPI = 500.0  # metre
+SAHA_YARICAPI = 10000.0  # metre (SITL için büyütüldü, gerçek yarışta 500.0 olacak)
 SAHA_DISI_TIMEOUT_S = 25.0  # 30s kural icin marj
 SAHA_DISI_WARNING_S = 15.0
 
@@ -67,7 +67,7 @@ def run_receiver_node():
     print(f"[CONFIG] Sabit referans: {ref_lat:.6f}, {ref_lon:.6f}, h={ref_h:.1f}m")
 
     kf = KF3D_UKF(kf_cfg)
-    rival_tracker = RivalTracker(ref_lat, ref_lon, ref_h, my_team_id=vehicle_cfg.team_id)
+    rival_tracker = RivalTracker(ref_lat, ref_lon, ref_h, my_team_id=vehicle_cfg.vehicle_id, arena_radius=500.0, allow_same_team=False)
     guidance = GpsPursuitController()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -217,6 +217,7 @@ def run_receiver_node():
 
                     # UKF'yi hiz bilgisiyle baslat
                     kf.initialize_from_pos(pos0, v_init=v_init)
+                    kf.x[3:7, 0] = angle_to_q(0.0, 0.0, gps_heading_rad)
                     is_init = True
                     print(f"[IHA-{vehicle_cfg.vehicle_id}] UKF Initialized | Pos: [{pos0[0]:.1f}, {pos0[1]:.1f}, {pos0[2]:.1f}] | Speed: {gps_speed:.1f} m/s")
                     fallback_state.update({"x": pos0[0], "y": pos0[1], "z": pos0[2], "speed": gps_speed})
@@ -294,7 +295,13 @@ def run_receiver_node():
                     ]
                 )
 
-                kf.update(z_full, dt, tm["gps"]["hdop"])
+                ok = kf.update(z_full, dt, tm["gps"]["hdop"])
+                if not ok:
+                    # Ölçüm reddedildi, UKF'yi GPS'e resetle (drift etmesin)
+                    kf.initialize_from_pos(raw_pos, v_init=np.array([gps_vx, gps_vy, vz_gps]))
+                    kf.x[3:7, 0] = angle_to_q(0.0, 0.0, gps_heading_rad)
+                    last_time = t_now
+                    continue
 
             est_x = float(kf.x[0].item())
             est_y = float(kf.x[1].item())
@@ -673,6 +680,3 @@ def run_receiver_node():
 
 if __name__ == "__main__":
     run_receiver_node()
-
-
-

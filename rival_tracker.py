@@ -238,11 +238,13 @@ class UnscentedKalmanFilter:
 # RIVAL TRACKER - TEKNOFEST FULL PARSER
 # ==================================================
 class RivalTracker:
-    def __init__(self, ref_lat, ref_lon, ref_h, my_team_id=2, scoring_weights=None):
+    def __init__(self, ref_lat, ref_lon, ref_h, my_team_id=2, scoring_weights=None, arena_radius=500.0, allow_same_team=False):
         self.ref_lat = ref_lat
         self.ref_lon = ref_lon
         self.ref_h = ref_h
         self.my_team_id = my_team_id  # Kendi takım ID'miz
+        self.arena_radius = float(arena_radius)
+        self.allow_same_team = allow_same_team
 
         self.filters = {}
         self.ignored = set()
@@ -276,7 +278,9 @@ class RivalTracker:
 
         for pkt in data:
             tid = pkt.get("takim_numarasi")
-            if tid is None or tid == self.my_team_id:
+            if tid is None:
+                continue
+            if (tid == self.my_team_id) and (not self.allow_same_team):
                 continue
 
             try:
@@ -421,8 +425,8 @@ class RivalTracker:
         my_heading_deg = (my_heading_deg if my_heading_deg is not None else 0.0) % 360.0
         my_pos = (my_x, my_y, my_z)
         my_dist_from_center = math.sqrt(my_x**2 + my_y**2)
-        ARENA_RADIUS = 500.0
-        SAFE_ZONE = 450.0
+        ARENA_RADIUS = self.arena_radius
+        SAFE_ZONE = 0.9 * ARENA_RADIUS
 
         for tid, ukf in self.filters.items():
             if tid in self.ignored:

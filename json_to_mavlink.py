@@ -76,51 +76,42 @@ def main():
 
         # cmd format: {"yaw": deg, "speed": m/s, "alt": m, ...}
         yaw_deg = float(cmd.get("yaw", 0.0))
-        speed = float(cmd.get("speed", 0.0))
-        alt_cmd = float(cmd.get("alt", 0.0))
+        speed = float(cmd.get("speed", 15.0))  # Minimum sabit kanat hızı
+        alt_cmd = float(cmd.get("alt", 50.0))
 
-        yaw_rad = math.radians(yaw_deg)
-        vx = speed * math.cos(yaw_rad)  # N
-        vy = speed * math.sin(yaw_rad)  # E
-
-        vz = 0.0
+        # ArduPlane için waypoint komutu (MAV_CMD_DO_REPOSITION)
+        # Yönelim doğrultusunda ileri mesafe hesapla (look ahead)
         if last_pos is not None:
-            alt_err = alt_cmd - last_pos[2]
-            vz = -max(-2.0, min(2.0, alt_err * 0.5))  # up is negative in NED
+            lat, lon, alt = last_pos
+            look_ahead = 200.0  # 200m ileri bak (sabit kanat için)
 
-        mask_vel = (
-            mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
-            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
-            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
-            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
-            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
-            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
-            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
-        )
+            # Yeni hedef koordinatları hesapla
+            yaw_rad = math.radians(yaw_deg)
+            target_lat = lat + (look_ahead * math.cos(yaw_rad)) / 111320.0
+            target_lon = lon + (look_ahead * math.sin(yaw_rad)) / (111320.0 * math.cos(math.radians(lat)))
 
-        try:
-            m.mav.set_position_target_local_ned_send(
-                0,
-                m.target_system,
-                m.target_component,
-                mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-                mask_vel,
-                0,
-                0,
-                0,
-                vx,
-                vy,
-                vz,
-                0,
-                0,
-                0,
-                0,
-                0,
-            )
-            print(f"[json->mav] cmd yaw={yaw_deg:.1f} spd={speed:.1f} alt={alt_cmd:.1f} -> vx={vx:.1f} vy={vy:.1f} vz={vz:.2f}")
-        except Exception as exc:
-            print(f"[json->mav] send error: {exc}")
+            try:
+                # ArduPlane için MAV_CMD_DO_REPOSITION komutu
+                m.mav.command_int_send(
+                    m.target_system,
+                    m.target_component,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                    mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+                    0,  # current (not used)
+                    0,  # autocontinue (not used)
+                    speed,  # param1: ground speed (m/s)
+                    0,  # param2: bitmask (0 = default)
+                    0,  # param3: radius (0 = use default)
+                    yaw_rad,  # param4: yaw (radians)
+                    int(target_lat * 1e7),  # x: latitude
+                    int(target_lon * 1e7),  # y: longitude
+                    alt_cmd  # z: altitude
+                )
+                print(f"[json->mav] ArduPlane cmd yaw={yaw_deg:.1f}° spd={speed:.1f}m/s alt={alt_cmd:.1f}m -> target:[{target_lat:.6f},{target_lon:.6f}]")
+            except Exception as exc:
+                print(f"[json->mav] send error: {exc}")
+        else:
+            print("[json->mav] Pozisyon bilinmiyor - komut gönderilemiyor")
 
         # Balant hayatta kalsn diye arada heartbeat dinle
         if (now - last_recv) > 1.0:

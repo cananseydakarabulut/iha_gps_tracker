@@ -7,7 +7,7 @@ from tactical_modules import AltitudeOptimizer, EnergyAwareController, WindEstim
 # AYARLAR
 # ==========================
 # Saha parametreleri
-SAHA_YARICAPI = 500.0  # metre
+SAHA_YARICAPI = 10000.0  # metre (SITL için büyütüldü, gerçek yarışta 500.0 olacak)
 GUVENLI_IRTIFA = 50.0   # Saha disina cikinca donulecek irtifa
 VISUAL_DIST_THRESH_M = 35.0  # Gorsel moda gecis mesafe esigi
 VISUAL_SPEED_THRESH = 6.0    # Gorsel moda gecis hedef hiz esigi
